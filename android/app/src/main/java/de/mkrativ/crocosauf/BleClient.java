@@ -35,13 +35,14 @@ public final class BleClient {
     private int nextId=1;
     private final Runnable timeout=()->disconnect("Keine Antwort. Verbindung getrennt; der letzte Befehl wird nicht wiederholt.");
     private final Runnable connectTimeout=()->disconnect("Verbindung dauert zu lange. Gerät wecken und erneut verbinden.");
-    private final Runnable scanTimeout=()->{stopScan();listener.onScanFinished();};
+    private final Runnable scanTimeout;
     private static final class Command {
         final int id; final byte[] bytes; final Result callback;
         Command(int id,byte[] bytes,Result callback){this.id=id;this.bytes=bytes;this.callback=callback;}
     }
     public BleClient(Context context,Listener listener) {
         this.context=context;this.listener=listener;
+        scanTimeout=()->{stopScan();this.listener.onScanFinished();};
         BluetoothManager manager=(BluetoothManager)context.getSystemService(Context.BLUETOOTH_SERVICE);
         adapter=manager==null?null:manager.getAdapter();
     }
