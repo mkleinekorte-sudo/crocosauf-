@@ -115,6 +115,8 @@ Solange ein Bluetooth-Gerät verbunden ist, schläft Crocosauf nicht ein. Nach d
 
 WLAN und Bluetooth sind voneinander unabhängig. Das automatische WLAN-Aus beendet keine laufenden Bluetooth-Tests. Ein vollständiges Ausschalten der Powerbank trennt natürlich beide Verbindungen.
 
+Die öffentliche Firmware enthält kein festes WLAN-Passwort. Beim ersten WLAN-Start erzeugt der ESP32 ein individuelles Passwort mit 16 Zeichen und speichert es auf dem Gerät. Falls du die zusätzliche Weboberfläche verwenden möchtest: USB anschließen, Seriellmonitor auf **115200 Baud** stellen und den ESP32 neu starten; dort erscheint „Crocosauf WLAN-Passwort“. SSID ist `crocosauf`, Adresse `http://192.168.4.1`. Das WLAN-Passwort bleibt auch beim Zurücksetzen der Spieleinstellungen erhalten. Für die Bluetooth-App brauchst du dieses Passwort nicht.
+
 ## 7. Prüfung vor dem ersten Spielabend
 
 - Kompiliert die App mit Android SDK 35 und besteht Android Lint?

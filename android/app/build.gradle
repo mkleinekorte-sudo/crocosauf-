@@ -1,0 +1,18 @@
+plugins { id 'com.android.application' }
+android {
+    namespace 'de.mkrativ.crocosauf'
+    compileSdk 35
+    defaultConfig {
+        applicationId 'de.mkrativ.crocosauf'
+        minSdk 26
+        targetSdk 35
+        versionCode 1
+        versionName '1.0-beta'
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    buildTypes { release { minifyEnabled false } }
+    lint { abortOnError true }
+}
