@@ -1,9 +1,11 @@
 # Crocosauf Bluetooth - Android-App 1.0-beta
 
 Für Marcels Crocosauf Deluxe mit ESP32 DevKit V1 / WROOM, DFPlayer, 20 LEDs und HT16K33-Display.
-Stand: 25.09.2026. Firmware: **v6.4-BLE**, auf Basis der Reparaturfassung v6.3.
+Stand: 26.09.2026. Firmware: **v6.4-BLE**, auf Basis der Reparaturfassung v6.3.
 
-**Dieses Paket enthält das vollständige Android-Projekt und den dazugehörigen ESP32-Sketch. Es enthält noch keine installierbare APK.** Die Android-SDK-/Gradle-Downloads waren in der Erstellungsumgebung nicht erreichbar. Ein echter Android-Build, ein nativer ESP32-Build und ein Versuch an deinem Gerät stehen aus. Die unten genannten Simulationen und Syntaxprüfungen sind bereits durchgeführt.
+**Die installierbare Android-Testversion ist fertig gebaut.** Android-Build, Android Lint, APK-Signaturprüfung und der echte ESP32-Build waren erfolgreich. Die APK wurde im Chat als `Crocosauf_1.0-beta.apk` bereitgestellt. Zusätzlich liegt sie als ZIP-Artefakt im [erfolgreichen GitHub-Build](https://github.com/mkleinekorte-sudo/crocosauf-/actions/runs/36250755658). Ein Versuch auf dem Handy und am echten Crocosauf steht noch aus.
+
+**Voraussetzung für Bluetooth:** Den neuen Sketch `firmware/Crocosauf_Deluxe_v6_4_BLE` einmal per USB auf den ESP32 laden. Mit dem alten v6.2-Sketch kann sich die App nicht verbinden.
 
 ## Was du damit bedienen kannst
 
@@ -33,9 +35,18 @@ Die Spielmechanik, Maulerkennung und zehn Pinchenrunden arbeiten eigenständig w
 
 Die vorhandene Pinbelegung bleibt erhalten: LEDs GPIO18, Maul GPIO27, Modus GPIO25, Lautstärke GPIO26, DFPlayer RX/TX an GPIO16/17, BUSY GPIO33, Display SDA21/SCL22. Die SD-Ordner bleiben Root sowie /02, /03, /04 und /05. Gespeicherte Spieleinstellungen werden weiterverwendet.
 
-## 2. Android-App bauen und installieren
+## 2. Android-App installieren
 
 Ziel: Android 8 oder neuer, insbesondere dein Pixel 7. Das Paket verwendet native Android-Ansichten und die Android-Bluetooth-Schnittstelle, keinen WebView und keinen Webserver für die App-Verbindung.
+
+### Fertige APK – kein Android Studio nötig
+
+1. `Crocosauf_1.0-beta.apk` aus dem Chat auf dein Handy herunterladen. Alternativ im oben verlinkten Build das Artefakt **Crocosauf-Android-APK** herunterladen und die ZIP entpacken; darin liegt dieselbe Datei als `app-debug.apk`.
+2. APK in der Datei-App öffnen. Falls Android nachfragt, der verwendeten Datei-App das Installieren aus dieser Quelle erlauben.
+3. **Installieren** wählen, anschließend **Crocosauf** öffnen.
+4. Beim Verbinden die Bluetooth-Berechtigung **Geräte in der Nähe** erlauben. Weiter mit Abschnitt 3.
+
+Die folgenden Schritte sind nur nötig, wenn du die App selbst neu bauen möchtest.
 
 ### Auf einem Windows-PC
 
@@ -119,8 +130,7 @@ Die öffentliche Firmware enthält kein festes WLAN-Passwort. Beim ersten WLAN-S
 
 ## 7. Prüfung vor dem ersten Spielabend
 
-- Kompiliert die App mit Android SDK 35 und besteht Android Lint?
-- Kompiliert v6.4-BLE mit deinen tatsächlichen ESP32-Bibliotheken und passt in die gewählte Partition?
+- Passende Firmware v6.4-BLE über USB auf den ESP32 laden; beim Selbstbau die unten geprüften Bibliotheksversionen verwenden.
 - Gerät in der App finden, Freigabe ausführen, alle Einstellungen korrekt laden.
 - Vor der Freigabe müssen Steuerbefehle gesperrt sein.
 - Track testen; Maul öffnen: Test endet, Spiel startet.
@@ -132,13 +142,20 @@ Die öffentliche Firmware enthält kein festes WLAN-Passwort. Beim ersten WLAN-S
 
 ## 8. Was bereits geprüft wurde
 
+- Echter Android-Build mit SDK 35, Build-Tools 35.0.0, Gradle 8.11.1, AGP 8.9.2 und JDK 17: erfolgreich.
+- Android Lint: keine Fehler; drei Hinweise zu Ziel-API, älteren Android-Versionen und Backup-Konfiguration. Kein Laufzeittest auf einem Handy oder Emulator.
+- APK-Signatur (Schema v2) mit `apksigner verify` erfolgreich geprüft. Nach Download SHA-256 mit dem Buildprotokoll verglichen.
+- APK: Paket `de.mkrativ.crocosauf`, Version `1.0-beta`, 39.432 Bytes, Android ab API 26.
+- APK SHA-256: `2035eae5c2dd5acec8863851b0f8bdbeeb339562e174d14e5c5bbdb511524aaf`.
+- Echter ESP32-Build mit Boardpaket 3.3.0 und Huge-APP-Partition: erfolgreich. Flash 2.097.159 / 3.145.728 Bytes; globale Variablen 65.504 / 327.680 Bytes. Dynamischer Speicherverbrauch im Betrieb ist darin nicht vollständig enthalten.
+- Dabei verwendet: FastLED 3.10.5, DFPlayerMini_Fast 1.2.4, FireTimer 1.0.5, Adafruit GFX Library 1.12.6, Adafruit LED Backpack Library 1.5.1 und Adafruit BusIO 1.17.4.
 - Gesamter v6.4-Sketch inklusive Bluetooth-Adapter mit nachgebildeten Arduino-/ESP32-/BLE-Schnittstellen als C++17 mit `-Wall -Wextra -Werror` übersetzt.
 - 17 vorhandene Spieltests bestanden.
 - Vier zusätzliche BLE-Szenarien bestanden: Freigabe, Einstellungsrouten, zerstückelte/überlange Befehle und Verbindungslebenszyklus.
 - Tatsächliche Java-Protokollklasse kompiliert und mit 267 Prüfungen getestet, einschließlich UTF-8 über 64 verschiedene Paketgrößen.
 - Alle drei Java-Quelldateien durch den Java-Parser auf Syntax geprüft.
 
-**Noch nicht durchgeführt:** echter Android-Build/Android-Lint, grafischer Test auf Android oder Emulator, echter ESP32-Build, Funk-/Hardwaretest. Eine Java-Syntaxprüfung prüft keine Android-API-Typen. Die C++-Simulation prüft keine reale BLE-API, Heap-Belegung, UART-/Funk-Timings oder elektrische Verdrahtung.
+**Noch nicht durchgeführt:** grafischer Test auf Android oder Emulator sowie Funk-/Hardwaretest. Die erfolgreichen Builds und Simulationen ersetzen keine Prüfung von Verbindung, Ton, Heap-Belegung, UART-/Funk-Timings und Verdrahtung am echten Gerät.
 
 Die Testskripte und Ergebnisse liegen in `tests`. `tests/run-tests.sh` wiederholt die lokalen Prüfungen. Nur die echte Firmware aus `firmware` auf den ESP32 laden; die nachgebildeten Schnittstellen unter `tests` sind keine Gerätebibliotheken.
 

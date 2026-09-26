@@ -21,3 +21,13 @@ PASS BLE framing
 PASS BLE lifecycle
 PASS Java transport: 267 checks (including 64 fragment sizes)
 PASS Java syntax: 3 source files; not an Android build
+
+Native build verification, 2026-09-26:
+PASS Android SDK 35 / AGP 8.9.2 / Gradle 8.11.1 / JDK 17 assembleDebug
+PASS lintDebug: 0 errors, 3 warnings (OldTargetApi, UnusedAttribute, DataExtractionRules)
+PASS APK Signature Scheme v2 via apksigner verify
+PASS downloaded APK SHA256 matches CI: 2035eae5c2dd5acec8863851b0f8bdbeeb339562e174d14e5c5bbdb511524aaf
+PASS ESP32 Arduino 3.3.0 / esp32:esp32:esp32:PartitionScheme=huge_app
+ESP32 flash: 2097159 / 3145728 bytes; static RAM: 65504 / 327680 bytes
+Build: https://github.com/mkleinekorte-sudo/crocosauf-/actions/runs/36250755658
+NOT TESTED: Android UI on device/emulator and physical ESP32/BLE/audio hardware.
