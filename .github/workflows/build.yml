@@ -1,3 +1,7 @@
+File "<stdin>", line 1
+    p='TheButcherApp/.github/workflows/build.yml';s=open(p).read();s=s.replace("arduino-cli lib install 'ArduinoJson@6.21.5' 'ESP Async WebServer' 'AsyncTCP'","arduino-cli lib install 'ArduinoJson@6.21.5' 'ESP Async WebServer@3.12.1'\n          mkdir -p "$HOME/Arduino/libraries"\n          git clone --depth 1 --branch v3.4.8 https://github.com/ESP32Async/AsyncTCP.git "$HOME/Arduino/libraries/AsyncTCP"");open(p,'w').write(s)
+                                                                                                                                                                                                                                                               ^
+SyntaxError: invalid syntax
 name: The Butcher Build
 on:
   push:
