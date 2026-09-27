@@ -12,23 +12,32 @@ import java.io.*;
 import java.util.*;
 
 public class MainActivity extends Activity {
-  LinearLayout root, content; TextView status; EditText host; JSONObject live; JSONArray steps=new JSONArray();
+  LinearLayout root, content; TextView status; JSONObject live; JSONArray steps=new JSONArray();
   Map<String,EditText> fields=new LinkedHashMap<>(); Map<String,Switch> switches=new LinkedHashMap<>();
-  final Handler handler=new Handler(); String base="http://192.168.4.1";
+  final Handler handler=new Handler(); BleClient ble; LinearLayout devices;
+  final Map<String,android.bluetooth.BluetoothDevice> found=new LinkedHashMap<>();
   interface Done { void run(String s) throws Exception; }
   void request(String path,String body,Done done){
-    String url=base+path;
-    new Thread(()->{try{
-      HttpURLConnection c=(HttpURLConnection)new URL(url).openConnection(); c.setConnectTimeout(4000);c.setReadTimeout(5000);
-      if(body!=null){c.setRequestMethod("POST");c.setDoOutput(true);c.setRequestProperty("Content-Type","application/json");c.getOutputStream().write(body.getBytes("UTF-8"));}
-      else if(!path.equals("/api/status") && !path.startsWith("/api/test?")){c.setRequestMethod("POST");}
-      int code=c.getResponseCode(); InputStream in=code<400?c.getInputStream():c.getErrorStream();
-      ByteArrayOutputStream out=new ByteArrayOutputStream();byte[] b=new byte[4096];int n;while((n=in.read(b))!=-1)out.write(b,0,n);
-      String response=out.toString("UTF-8");c.disconnect();
-      if(code>=400)throw new IOException(code+": "+response);
-      handler.post(()->{try{done.run(response);}catch(Exception e){toast(e.getMessage());}});
-    }catch(Exception e){handler.post(()->toast("Verbindung: "+e.getMessage()));}}).start();
+    if(ble==null||!ble.ready()){toast("Bitte Bluetooth verbinden.");return;}
+    ble.send(path,body,r->{if(!r.ok()){toast(r.code+": "+r.body);return;}
+      try{done.run(r.body);}catch(Exception e){toast(e.getMessage());}});
   }
+  void permissionsAndScan(){
+    if(android.os.Build.VERSION.SDK_INT>=31){
+      if(checkSelfPermission("android.permission.BLUETOOTH_SCAN")!=android.content.pm.PackageManager.PERMISSION_GRANTED||
+         checkSelfPermission("android.permission.BLUETOOTH_CONNECT")!=android.content.pm.PackageManager.PERMISSION_GRANTED){
+        requestPermissions(new String[]{"android.permission.BLUETOOTH_SCAN","android.permission.BLUETOOTH_CONNECT"},7);return;}
+    }else if(android.os.Build.VERSION.SDK_INT>=23&&checkSelfPermission("android.permission.ACCESS_FINE_LOCATION")!=android.content.pm.PackageManager.PERMISSION_GRANTED){
+      requestPermissions(new String[]{"android.permission.ACCESS_FINE_LOCATION"},7);return;}
+    found.clear();devices.removeAllViews();status.setText("Suche The Butcher …");ble.scan();
+  }
+  @Override public void onRequestPermissionsResult(int req,String[] p,int[] g){super.onRequestPermissionsResult(req,p,g);
+    if(req==7){for(int x:g)if(x!=android.content.pm.PackageManager.PERMISSION_GRANTED){toast("Bluetooth-Berechtigung erforderlich.");return;}permissionsAndScan();}}
+  void approvalCheck(){if(ble==null||!ble.ready())return;ble.send("/hello",null,r->{try{
+    JSONObject o=new JSONObject(r.body);if(!o.optString("product").equals("butcher")){toast("Falsches Gerät.");return;}
+    if(o.optBoolean("approved")){refresh();return;}
+    status.setText("Verbunden · Reset-Taster am ESP32 3 Sekunden halten");handler.postDelayed(this::approvalCheck,1600);
+  }catch(Exception e){toast(e.getMessage());}});}
   void toast(String s){Toast.makeText(this,s,Toast.LENGTH_LONG).show();}
   TextView text(String s){TextView t=new TextView(this);t.setText(s);t.setTextSize(17);t.setPadding(14,14,14,8);return t;}
   Button button(String title,Runnable action){Button b=new Button(this);b.setText(title);b.setOnClickListener(v->action.run());return b;}
@@ -91,9 +100,18 @@ public class MainActivity extends Activity {
   }
   void refresh(){request("/api/status",null,s->{live=new JSONObject(s);steps=live.getJSONArray("steps");status.setText(live.optString("state")+" · "+live.optString("ip")+(live.optBoolean("estop")?" · E-STOP":""));});}
   public void onCreate(Bundle b){super.onCreate(b);root=new LinearLayout(this);root.setOrientation(1);root.setPadding(12,12,12,0);root.setBackgroundColor(Color.rgb(250,250,250));setContentView(root);
-    host=new EditText(this);host.setSingleLine();host.setText(getPreferences(0).getString("host","192.168.4.1"));host.setHint("ESP32 IP-Adresse");root.addView(host);
-    root.addView(button("Verbinden / Aktualisieren",()->{base="http://"+host.getText().toString().trim().replace("http://","").replaceAll("/$","");getPreferences(0).edit().putString("host",host.getText().toString()).apply();refresh();}));
-    status=text("Nicht verbunden");root.addView(status);HorizontalScrollView nav=new HorizontalScrollView(this);LinearLayout tabs=new LinearLayout(this);for(String name:new String[]{"Steuerung","Zeitpläne","Effekte","WLAN"})tabs.addView(button(name,()->page(name)));nav.addView(tabs);root.addView(nav);
-    ScrollView scroll=new ScrollView(this);content=new LinearLayout(this);content.setOrientation(1);scroll.addView(content);root.addView(scroll);refresh();
+    status=text("Bluetooth nicht verbunden");root.addView(status);
+    root.addView(button("The Butcher suchen",this::permissionsAndScan));devices=new LinearLayout(this);devices.setOrientation(1);root.addView(devices);
+    HorizontalScrollView nav=new HorizontalScrollView(this);LinearLayout tabs=new LinearLayout(this);
+    for(String name:new String[]{"Steuerung","Zeitpläne","Effekte","WLAN"})tabs.addView(button(name,()->page(name)));nav.addView(tabs);root.addView(nav);
+    ScrollView scroll=new ScrollView(this);content=new LinearLayout(this);content.setOrientation(1);scroll.addView(content);root.addView(scroll);
+    ble=new BleClient(this,new BleClient.Listener(){
+      public void onDevice(android.bluetooth.BluetoothDevice device,int rssi){String key=device.getAddress();if(found.containsKey(key))return;found.put(key,device);
+        devices.addView(button("The Butcher · "+key+" ("+rssi+" dBm)",()->{devices.removeAllViews();ble.connect(device);}));}
+      public void onReady(){status.setText("Verbunden · Reset-Taster 3 Sekunden halten");approvalCheck();}
+      public void onDisconnected(String reason){live=null;status.setText(reason);content.removeAllViews();}
+      public void onMessage(String msg){status.setText(msg);toast(msg);}
+    });
   }
+  @Override protected void onDestroy(){if(ble!=null)ble.disconnect("App geschlossen");super.onDestroy();}
 }

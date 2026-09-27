@@ -1,4 +1,4 @@
-/* The Butcher v5.4 – ESP32 Arduino Core 3.3.x
+/* The Butcher v5.5 BLE – ESP32 Arduino Core 3.3.x
  * Bibliotheken: ESP Async WebServer, AsyncTCP, ArduinoJson 6.x
  * K1/K3/K4/K6 Relais LOW-aktiv. E-Stop GPIO32 HIGH = gesperrt.
  * E-Stop muss zusätzlich die Aktorversorgung hardwareseitig abschalten.
@@ -128,7 +128,7 @@ String validate(){if(state!=IDLE)return "Nur im IDLE";if(stagedTotal<1000||stage
     if(s.ac>=PULSE){if(!s.dur_ms||s.dur_ms>stagedTotal-s.t_ms)return "Dauer ausserhalb der Show";busy[s.ch]=s.t_ms+s.dur_ms;}
   }return "";
 }
-void status(AsyncWebServerRequest*r){DynamicJsonDocument d(18000);uint32_t now=millis();d["state"]=state==IDLE?"IDLE":state==RUNNING?"RUNNING":state==COOLDOWN?"COOLDOWN":"ESTOP";d["estop"]=emergency();d["ip"]=(useAP?WiFi.softAPIP():WiFi.localIP()).toString();
+String statusJson(){DynamicJsonDocument d(18000);uint32_t now=millis();d["state"]=state==IDLE?"IDLE":state==RUNNING?"RUNNING":state==COOLDOWN?"COOLDOWN":"ESTOP";d["estop"]=emergency();d["ip"]=(useAP?WiFi.softAPIP():WiFi.localIP()).toString();
   d["total_time_ms"]=totalMs;d["cooldown_ms"]=cooldownMs;d["k1_autopulse"]=k1Auto;d["k1_pulse_ms"]=k1PulseMs;d["loop"]=loopMode;
   d["t_since_ms"]=state==RUNNING?now-showStart:0;d["t_left_ms"]=state==RUNNING&&!due(now,showStart+totalMs)?showStart+totalMs-now:0;
   d["t_next_ms"]=state==RUNNING&&nextStep<countSteps&&!due(now,showStart+steps[nextStep].t_ms)?showStart+steps[nextStep].t_ms-now:0;
@@ -139,8 +139,9 @@ void status(AsyncWebServerRequest*r){DynamicJsonDocument d(18000);uint32_t now=m
   JsonObject h=d.createNestedObject("h5");h["pmin"]=handleCfg.pmin;h["pmax"]=handleCfg.pmax;h["hmin"]=handleCfg.hmin;h["hmax"]=handleCfg.hmax;h["rmin"]=handleCfg.rmin;h["rmax"]=handleCfg.rmax;h["peak"]=handleCfg.peak;h["jamp"]=handleCfg.jamp;h["jint_min"]=handleCfg.jint_min;h["jint_max"]=handleCfg.jint_max;h["repmin"]=handleCfg.repmin;h["repmax"]=handleCfg.repmax;h["gapmin"]=handleCfg.gapmin;h["gapmax"]=handleCfg.gapmax;
   JsonObject b3=d.createNestedObject("rblink3");b3["on_ms"]=blink3.on_ms;b3["off_ms"]=blink3.off_ms;JsonObject b6=d.createNestedObject("rblink6");b6["on_ms"]=blink6.on_ms;b6["off_ms"]=blink6.off_ms;
   for(uint8_t ch:{uint8_t(2),uint8_t(7),uint8_t(8)}){String key="auto"+String(ch);fillAuto(d.createNestedObject(key),autoCfg[ch]);}
-  String out;serializeJson(d,out);r->send(200,"application/json",out);
+  String out;serializeJson(d,out);return out;
 }
+void status(AsyncWebServerRequest*r){r->send(200,"application/json",statusJson());}
 void jsonRoute(const char*path,void(*fn)(AsyncWebServerRequest*,JsonVariant)){server.on(path,HTTP_POST,[](AsyncWebServerRequest*){},nullptr,
   [fn](AsyncWebServerRequest*r,uint8_t*data,size_t len,size_t index,size_t total){
     if(index==0){if(total>20000){r->send(413,"text/plain","Zu gross");return;}r->_tempObject=new String();}
@@ -148,6 +149,9 @@ void jsonRoute(const char*path,void(*fn)(AsyncWebServerRequest*,JsonVariant)){se
     if(index+len==total){DynamicJsonDocument d(20000);DeserializationError err=deserializeJson(d,*body);delete body;r->_tempObject=nullptr;
       if(err){r->send(400,"text/plain","JSON Fehler");return;}fn(r,d.as<JsonVariant>());}
   });}
+
+#include "ButcherBle.h"
+
 void setup(){Serial.begin(115200);for(uint8_t ch=1;ch<=6;ch++){digitalWrite(relayPin[ch],HIGH);pinMode(relayPin[ch],OUTPUT);}pinMode(START_PIN,INPUT_PULLUP);pinMode(RESET_PIN,INPUT_PULLUP);pinMode(ESTOP_PIN,INPUT_PULLUP);
   for(uint8_t ch:{uint8_t(2),uint8_t(5),uint8_t(7),uint8_t(8)})ledcAttach(pwmPin[ch],1000,10);ledcAttach(STATUS_PIN,5000,10);allOff();randomSeed(esp_random());load();
   prefs.begin("butcherwifi",true);useAP=prefs.getBool("ap",true);apSsid=prefs.getString("aps","");apPass=prefs.getString("app","");staSsid=prefs.getString("ss","");staPass=prefs.getString("sp","");prefs.end();
@@ -182,8 +186,9 @@ void setup(){Serial.begin(115200);for(uint8_t ch=1;ch<=6;ch++){digitalWrite(rela
     else{r->send(400,"text/plain","Modus ungueltig");return;}
     prefs.begin("butcherwifi",false);prefs.putBool("ap",useAP);prefs.putString("aps",apSsid);prefs.putString("app",apPass);prefs.putString("ss",staSsid);prefs.putString("sp",staPass);prefs.end();r->send(200,"text/plain","OK – neu starten");});
   server.begin();
+  butcherBleStart();
 }
-void loop(){uint32_t now=millis();if(emergency()){if(state!=ESTOP){state=ESTOP;allOff();}}else if(state==ESTOP){allOff();}
+void loop(){uint32_t now=millis();butcherBleTick();if(emergency()){if(state!=ESTOP){state=ESTOP;allOff();}}else if(state==ESTOP){allOff();}
   if(state!=ESTOP){for(uint8_t ch=1;ch<=8;ch++)runEffect(ch,now);
     if(state==RUNNING){while(nextStep<countSteps&&due(now,showStart+steps[nextStep].t_ms)&&!due(now,showStart+totalMs)){startEffect(steps[nextStep++]);}
       if(due(now,showStart+totalMs)){allOff();state=COOLDOWN;coolEnd=now+cooldownMs;}}
@@ -193,6 +198,7 @@ void loop(){uint32_t now=millis();if(emergency()){if(state!=ESTOP){state=ESTOP;a
   static bool sRaw=true,sStable=true,sArmed=true,rRaw=true,rStable=true;static uint32_t sChanged=0,sDown=0,rChanged=0,rDown=0;
   bool s=digitalRead(START_PIN);if(s!=sRaw){sRaw=s;sChanged=now;}if(due(now,sChanged+120)&&s!=sStable){sStable=s;if(!s){sDown=now;sArmed=true;}else sArmed=true;}
   if(!sStable&&sArmed&&due(now,sDown+60)){sArmed=false;beginShow();}
-  bool r=digitalRead(RESET_PIN);if(r!=rRaw){rRaw=r;rChanged=now;}if(due(now,rChanged+120)&&r!=rStable){rStable=r;if(!r)rDown=now;else if(due(now,rDown+2000))ESP.restart();else if(state==ESTOP&&!emergency()){allOff();state=IDLE;}}
+  bool r=digitalRead(RESET_PIN);if(r!=rRaw){rRaw=r;rChanged=now;}if(due(now,rChanged+120)&&r!=rStable){rStable=r;if(!r)rDown=now;else if(due(now,rDown+8000))ESP.restart();else if(state==ESTOP&&!emergency()){allOff();state=IDLE;}}
+  if(!rStable && due(now,rDown+3000) && !due(now,rDown+8000)) butcherBleApprove();
   ledcWrite(STATUS_PIN,state==ESTOP?(now/100%2?1023:0):state==COOLDOWN?(now/10%1024):1023);
 }

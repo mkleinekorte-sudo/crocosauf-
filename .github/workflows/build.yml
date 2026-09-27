@@ -40,4 +40,4 @@ jobs:
           arduino-cli lib install 'ArduinoJson@6.21.5' 'ESP Async WebServer@3.12.1'
           mkdir -p "$HOME/Arduino/libraries"
           git clone --depth 1 --branch v3.4.8 https://github.com/ESP32Async/AsyncTCP.git "$HOME/Arduino/libraries/AsyncTCP"
-          arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=huge_app --warnings all firmware/The_Butcher_v5_4
+          arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=huge_app --warnings all firmware/The_Butcher_v5_5_BLE
