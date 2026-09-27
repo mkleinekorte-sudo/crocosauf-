@@ -12,3 +12,7 @@ Android-App und vollständiger ESP32-Sketch für Bluetooth Low Energy. Die App s
 Die Show-Einstellungen aus v5.4 liegen weiterhin im NVS-Bereich `butcher54`. Ein vorhandener v5.3-Speicher wird nicht automatisch übernommen. Die Pins entsprechen v5.3.
 
 GitHub Actions kompiliert App und Firmware. Ein erfolgreiches Kompilat ersetzt keinen Gerätetest. Prüfe insbesondere die Relaiszuordnung und den physischen E-Stop ohne angeschlossene Aktoren. Der E-Stop sollte deren Versorgung unabhängig vom ESP32 unterbrechen. GPIO12 ist ein Boot-Strapping-Pin an einem der bisherigen Relaisanschlüsse.
+
+## Gestaltung
+
+Android-App 1.2-beta mit mkrativ-Branding, Halloween-Motiv und getrennten Bereichen für Show, Kanäle, Zeitplan, Effekte und WLAN. Das Motiv liegt in `app/src/main/res/drawable/butcher_bg.jpg`.
