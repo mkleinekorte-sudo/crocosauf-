@@ -4,7 +4,7 @@
 
 Die native Android-App nutzt WLAN und die JSON-Schnittstelle des ESP32, keine Web-UI. Beim ersten Start erzeugt der ESP32 einen individuellen AP-Namen und ein individuelles Passwort. Beides wird am USB-Seriellmonitor (115200 Baud) angezeigt. Verbinde das Telefon damit und trage die IP des ESP32 in der App ein. Im Heimnetz die dort vergebene ESP32-IP eingeben.
 
-Zum Bau: In Android Studio diesen Ordner öffnen, Gradle synchronisieren und `Build > Build APK(s)` wählen. Benötigt Android SDK 35, JDK 17 und Android Gradle Plugin 8.7.3. GitHub Actions baut nach dem Push eine Debug-APK als Workflow-Artefakt. Eine vorab geprüfte APK ist nicht enthalten.
+Die installierbare Debug-APK liegt als `TheButcher_1.0-beta.apk` im Repository. Alternativ: In Android Studio diesen Ordner öffnen, Gradle synchronisieren und `Build > Build APK(s)` wählen. GitHub Actions baut Android-App und ESP32-Sketch bei Änderungen erneut.
 
-Es wurde hier weder ein ESP32-Kompilat noch ein Test am echten Gerät ausgeführt. Prüfe die Verdrahtung und den E-Stop vor dem Anschluss von Relais, Pumpe und Aktoren. Der E-Stop sollte zusätzlich die Aktorversorgung hardwareseitig unterbrechen. GPIO12 ist ein Boot-Strapping-Pin und hängt am bisherigen K2-Relaisanschluss; externe Beschaltung darf den Startpegel nicht stören.
+Android-App und ESP32-Sketch wurden per GitHub Actions erfolgreich kompiliert. Ein Test am echten Gerät wurde nicht ausgeführt. Prüfe die Verdrahtung und den E-Stop vor dem Anschluss von Relais, Pumpe und Aktoren. Der E-Stop sollte zusätzlich die Aktorversorgung hardwareseitig unterbrechen. GPIO12 ist ein Boot-Strapping-Pin und hängt am bisherigen K2-Relaisanschluss; externe Beschaltung darf den Startpegel nicht stören.
 
