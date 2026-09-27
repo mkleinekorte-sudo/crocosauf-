@@ -1,7 +1,0 @@
-.gradle/
-**/build/
-work_tests/
-local.properties
-*.jks
-*.keystore
-.DS_Store

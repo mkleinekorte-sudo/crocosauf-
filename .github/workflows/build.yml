@@ -1,8 +1,8 @@
-name: Crocosauf Build
+name: The Butcher Build
 on:
-  workflow_dispatch:
   push:
-    branches: [main, master]
+    branches: [the-butcher-app]
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
@@ -17,29 +17,16 @@ jobs:
       - uses: android-actions/setup-android@v3
         with:
           packages: platform-tools
-          log-accepted-android-sdk-licenses: false
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.11.1'
       - run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
-      - run: gradle --no-daemon :app:assembleDebug :app:lintDebug
-        working-directory: android
-      - name: APK prüfen
-        run: |
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose android/app/build/outputs/apk/debug/app-debug.apk
-          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging android/app/build/outputs/apk/debug/app-debug.apk
-          sha256sum android/app/build/outputs/apk/debug/app-debug.apk
+      - run: gradle --no-daemon :app:assembleDebug
       - uses: actions/upload-artifact@v4
         with:
-          name: Crocosauf-Android-APK
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          name: TheButcher-Android-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: Crocosauf-Android-Pruefberichte
-          path: android/app/build/reports/
-          if-no-files-found: ignore
   esp32:
     runs-on: ubuntu-latest
     steps:
@@ -50,10 +37,5 @@ jobs:
           arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
           arduino-cli core update-index
           arduino-cli core install esp32:esp32@3.3.0
-          arduino-cli lib install 'FastLED' 'DFPlayerMini_Fast' 'FireTimer' 'Adafruit GFX Library' 'Adafruit LED Backpack Library' 'Adafruit BusIO'
-          arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=huge_app --warnings all --output-dir build/esp32 firmware/Crocosauf_Deluxe_v6_4_BLE
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Crocosauf-ESP32-build
-          path: build/esp32/
-          if-no-files-found: error
+          arduino-cli lib install 'ArduinoJson@6.21.5' 'ESP Async WebServer' 'AsyncTCP'
+          arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=huge_app --warnings all firmware/The_Butcher_v5_4
