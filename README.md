@@ -5,7 +5,7 @@ Android-App und vollständiger ESP32-Sketch für Bluetooth Low Energy. Die App s
 ## Installation
 
 1. `firmware/The_Butcher_v5_5_BLE/The_Butcher_v5_5_BLE.ino` auf ein ESP32 Dev Module mit Arduino Core 3.3.x flashen. Bibliotheken: ArduinoJson 6.21.5, ESPAsyncWebServer 3.12.1 und ESP32Async/AsyncTCP 3.4.8.
-2. `TheButcher_1.1-beta.apk` auf Android installieren und Bluetooth erlauben.
+2. `TheButcher_1.2-beta.apk` auf Android installieren und Bluetooth erlauben.
 3. App öffnen, **The Butcher suchen**, Gerät auswählen. Am ESP32 den Reset-Taster auf GPIO18 **3 Sekunden halten**, um genau diese Verbindung freizugeben. Für einen Neustart den Reset-Taster **8 Sekunden halten und loslassen**.
 4. Anschließend zeigt die App den Status und alle Einstellungsbereiche. Die Freigabe ist nach einer Trennung erneut nötig.
 
