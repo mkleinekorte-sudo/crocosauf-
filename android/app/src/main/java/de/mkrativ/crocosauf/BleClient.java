@@ -99,7 +99,7 @@ public final class BleClient {
             main.post(()->{
                 if(link!=gatt)return;
                 BluetoothGattService service=link.getService(SERVICE);
-                if(status!=0 || service==null){disconnect("Passender Crocosauf-Sketch v6.4-BLE fehlt.");return;}
+                if(status!=0 || service==null){disconnect("Passender Crocosauf-Bluetooth-Sketch fehlt.");return;}
                 rx=service.getCharacteristic(RX);
                 BluetoothGattCharacteristic tx=service.getCharacteristic(TX);
                 BluetoothGattDescriptor descriptor=tx==null?null:tx.getDescriptor(CCCD);

@@ -1,4 +1,4 @@
-#include "../firmware/Crocosauf_Deluxe_v6_5_BLE/Crocosauf_Deluxe_v6_5_BLE.ino"
+#include "../firmware/Crocosauf_Deluxe_v6_6_BLE_40LED_APPONLY/Crocosauf_Deluxe_v6_6_BLE_40LED_APPONLY.ino"
 #define CHECK(x) do{if(!(x)){std::cerr<<"FAIL "<<__LINE__<<": "<<#x<<"\n";return 2;}}while(0)
 static void tick(uint32_t duration) {
   uint32_t start=millis();
@@ -22,7 +22,7 @@ int main(int argc,char**argv) {
   setup();CHECK(welcomeActive);
   tick(1500);CHECK(stage==READY);CHECK(loops()==0);
   pins[25]=LOW;tick(80);CHECK(pinchenMode);CHECK(welcomeActive);
-  handleStop();CHECK(server.code==409);
+  handleStop();CHECK(appResponseCode==409);
   tick(9500);CHECK(welcomeActive);CHECK(loops()==0);
   tick(2200);CHECK(!welcomeActive);CHECK(stage==PLAYING);CHECK(pinchenMode);
   CHECK(loops()==1);
@@ -70,30 +70,18 @@ int main(int argc,char**argv) {
   CHECK(!pinchenMode);CHECK(rundeAktuell==1);
  } else if(name=="tests_interrupt") {
   noWelcomeBoot();
-  server.args={{"id","3"}};handleTestVisual(false);
+  appQuery="id=3";handleTestVisual(false);
   CHECK(uiEffectTesting);openMouth();CHECK(!uiEffectTesting);CHECK(stage==PLAYING);
   closeMouth();tick(8100);
   handleTestVisual(true);CHECK(uiDispTesting);
   pins[25]=LOW;tick(100);CHECK(!uiDispTesting);CHECK(pinchenMode);
-  server.args={{"src","w"},{"t","1"}};handlePlay();CHECK(uiPlaying);
+  appQuery="src=w&t=1";handlePlay();CHECK(uiPlaying);
   openMouth();CHECK(!uiPlaying);CHECK(stage==PLAYING);CHECK(!welcomeActive);
   closeMouth();tick(8100);
-  server.args={{"id","4"}};handleTestVisual(true);
+  appQuery="id=4";handleTestVisual(true);
   tick(60100);CHECK(!uiDispTesting);
- } else if(name=="wifi_idle") {
-  noWelcomeBoot();startWebUI();uint32_t start=millis();
-  CHECK(apPassword.length()==16);
-  String savedPassword=apPassword;
-  handleFactoryReset();CHECK(server.code==200);
-  startWebUI();CHECK(apPassword==savedPassword);
-  tick(240000);CHECK(wifiEnabled);
-  WiFi.clients=1;tick(180000);CHECK(wifiEnabled);
-  WiFi.clients=0;tick(1000);CHECK(wifiEnabled);
-  tick(298000);CHECK(wifiEnabled);
-  tick(2000);CHECK(!wifiEnabled);
-  CHECK(uint32_t(millis()-start)>=720000);
  } else if(name=="reminder_sleep") {
-  noWelcomeBoot(true);rundeAktuell=5;usedPinchenMask=15;
+  noWelcomeBoot(true);sleepMinutes=30;rundeAktuell=5;usedPinchenMask=15;
   uint32_t activity=lastUserActivity;
   tick(480100);CHECK(reminderRunning);CHECK(reminderShowCup);
   CHECK(lastUserActivity==activity);tick(1800);CHECK(!reminderShowCup);
@@ -104,15 +92,15 @@ int main(int argc,char**argv) {
   CHECK(mockWakeMicros<480000000ULL);
  } else if(name=="timer_wake") {
   pins.fill(HIGH);pins[27]=LOW;pins[25]=LOW;
-  mockWake=ESP_SLEEP_WAKEUP_TIMER;mockReset=ESP_RST_DEEPSLEEP;
+  mockWake=ESP_SLEEP_WAKEUP_TIMER;mockReset=ESP_RST_DEEPSLEEP;prefs.putUShort("sleepMin",30);
   rtcMagic=0xC60C6301;rtcRound=4;rtcUsed=7;rtcPinchenMode=1;
   prefs.putString("pOrder","0123456789");
-  setup();CHECK(rundeAktuell==4);CHECK(usedPinchenMask==7);CHECK(!wifiEnabled);
+  setup();CHECK(rundeAktuell==4);CHECK(usedPinchenMask==7);
   CHECK(reminderRunning);CHECK(sleepAfterReminder);
   bool slept=false;try{tick(4000);}catch(Slept&){slept=true;}CHECK(slept);
  } else if(name=="wake_interrupted") {
   pins.fill(HIGH);pins[27]=LOW;
-  mockWake=ESP_SLEEP_WAKEUP_TIMER;mockReset=ESP_RST_DEEPSLEEP;
+  mockWake=ESP_SLEEP_WAKEUP_TIMER;mockReset=ESP_RST_DEEPSLEEP;prefs.putUShort("sleepMin",30);
   setup();CHECK(reminderRunning);openMouth();
   CHECK(!reminderRunning);CHECK(!sleepAfterReminder);CHECK(stage==PLAYING);
  } else if(name=="mute_volume") {
@@ -135,20 +123,16 @@ int main(int argc,char**argv) {
   last=1;for(int i=0;i<10000;i++){int before=last;int v=pickFromMask_1based(12,3,true,last);CHECK(v!=before);CHECK(v==1||v==2);}
   last=-1;CHECK(pickEffectFromMask_0based(20,0xFFFFF,false,last)==0);
   last=0;for(int i=0;i<10000;i++){int before=last;int v=pickEffectFromMask_0based(20,0x80001,true,last);CHECK(v!=before);}
- } else if(name=="web_export") {
-  noWelcomeBoot();startWebUI();
-  for(String tab:{"music","effects","system","help"}){
-   std::ofstream("work_tests/"+tab+".html")<<renderPage(tab);
-  }
+ } else if(name=="api_export") {
+  noWelcomeBoot();
   standbyText="a\"\\\n<&";audioError="x\n\"\\";
   std::ofstream("work_tests/status.json")<<statusJson();
-  std::ofstream routes("work_tests/routes.txt");
-  for(auto item:server.routes)routes<<item.first<<"\n";
-  server.args={{"src","g"},{"t","13"}};handlePlay();CHECK(server.code==400);
-  server.args={{"rmin","-20"},{"rdur","-1"}};handleSaveReminderCfg();
+  std::ofstream("work_tests/config.json")<<configJson();
+  appQuery="src=g&t=13";handlePlay();CHECK(appResponseCode==400);
+  appQuery="rmin=-20&rdur=-1";handleSaveReminderCfg();
   CHECK(reminderIntervalMs==60000);CHECK(reminderEffectDurationMs==1500);
   CHECK(!reminderEnabled);
-  handleFactoryReset();CHECK(server.code==200);
+  handleFactoryReset();CHECK(appResponseCode==200);
   CHECK(reminderIntervalMs==480000);CHECK(reminderEffectDurationMs==3500);
   CHECK(volumeLevel==20);CHECK(!isMuted);CHECK(gameTrackMask==63);
   CHECK(standbyText=="CROCOSAUF DELUXE");
@@ -161,9 +145,9 @@ int main(int argc,char**argv) {
    for(int f=0;f<400;f++){mockMillis+=31;effect_render(i);}
   }
  } else if(name=="wrap") {
-  noWelcomeBoot();mockMillis=0xFFFFFF00;markActivity();startWebUI();
+  noWelcomeBoot();mockMillis=0xFFFFFF00;markActivity();
   showVolumeOnMatrix();tick(1400);CHECK(dispMode==DISP_SCROLL);
-  CHECK(wifiEnabled);CHECK(uint32_t(millis()-lastUserActivity)<2000);
+  CHECK(uint32_t(millis()-lastUserActivity)<2000);
   openMouth();CHECK(stage==PLAYING);closeMouth();tick(5200);
   CHECK(stage==READY);CHECK(dispMode==DISP_SCROLL);
  } else return 3;

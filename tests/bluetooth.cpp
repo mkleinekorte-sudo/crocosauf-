@@ -1,4 +1,4 @@
-#include "../firmware/Crocosauf_Deluxe_v6_5_BLE/Crocosauf_Deluxe_v6_5_BLE.ino"
+#include "../firmware/Crocosauf_Deluxe_v6_6_BLE_40LED_APPONLY/Crocosauf_Deluxe_v6_6_BLE_40LED_APPONLY.ino"
 #define CHECK(x) do{if(!(x)){std::cerr<<"FAIL "<<__LINE__<<": "<<#x<<"\n";return 2;}}while(0)
 static void tick(uint32_t duration){uint32_t start=millis();while(uint32_t(millis()-start)<duration){loop();mockMillis+=9;}}
 static String response(){String r;for(const auto& c:bleTx->notifications)r+=c;bleTx->notifications.clear();return r;}
@@ -48,7 +48,7 @@ int main(int argc,char** argv){
    bool slept=false;try{tick(1900000);}catch(Slept&){slept=true;}CHECK(!slept);
    pins[27]=LOW;stage=READY;welcomeActive=false;reminderRunning=false;
    cmd("1 /testEffect?id=4");CHECK(uiEffectTesting);
-   startWebUI();wifiNoClientSince=millis()-WIFI_AUTO_OFF_MS;maybeDisableWifiIfIdle();CHECK(!wifiEnabled);CHECK(uiEffectTesting);
+   CHECK(uiEffectTesting);
    pins[27]=HIGH;tick(1000);CHECK(!uiEffectTesting);CHECK(stage==PLAYING);
  } else return 3;
  std::cout<<"PASS BLE "<<test<<"\n";

@@ -1,0 +1,2348 @@
+/*
+  CROCOSAUF DELUXE – VERSION 6.4-BLE  (ESP32 DevKit V1 / WROOM)
+
+  Patch:
+  ✅ LED-Strip: 40 LEDs
+  ✅ Pinchen-Anzeige: 2 LEDs pro Pinchen (1..10)
+  ✅ SD/DFPlayer FAILSAFE: Spiel läuft auch ohne SD / ohne DFPlayer (nur ohne Sound)
+  ✅ WebUI/WLAN vollständig entfernt
+  ✅ Steuerung/Einstellungen ausschließlich per Android-App über Bluetooth LE
+  ✅ Lautstärke:
+     - Start-Lautstärke (beim Einschalten)
+     - Welcome-Lautstärke (nur für Welcome-Sound)
+     Beides per App einstellbar und gespeichert.
+  ✅ NEU:
+     - Display Rotation 0/90/180/270 per App (wird gespeichert)
+     - Audio ON/OFF per App (wird gespeichert)
+  ✅ NEU (JETZT):
+     - LED-Strip Helligkeit in % (0..100) per App (gespeichert)
+     - Display Helligkeit in % (0..100) per App (gespeichert)
+     - Welcome-Sound kommt auch, wenn vorher per Taster Mute gespeichert war (nach Neustart)
+*/
+
+#define SKETCH_NAME    "Crocosauf Deluxe"
+#define SKETCH_VERSION "v6.4-BLE-40LED-APPONLY"
+
+#include <Arduino.h>
+#include <Preferences.h>
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
+#include <Wire.h>
+
+#include <FastLED.h>
+#include <DFPlayerMini_Fast.h>
+
+#include <Adafruit_GFX.h>
+#include <Adafruit_LEDBackpack.h>
+
+Adafruit_8x8matrix matrix = Adafruit_8x8matrix();
+
+#include "esp_sleep.h"
+#include "driver/rtc_io.h"
+#include "esp32-hal-cpu.h"
+
+// ============================================================
+// PINS (ESP32 DevKit V1)
+// ============================================================
+#define LED_PIN           18
+#define NUM_LEDS          40
+
+#define MAUL_SENSOR_PIN   27
+#define VOLUME_TASTER     26
+#define MODUS_PIN         25
+
+#define I2C_SDA           21
+#define I2C_SCL           22
+
+#define DFPLAYER_RX_PIN   16
+#define DFPLAYER_TX_PIN   17
+#define DFPLAYER_BUSY_PIN 33   // LOW=spielt, HIGH=idle
+
+// ============================================================
+// DFPLAYER FOLDERS / COUNTS
+// ============================================================
+#define FOLDER_GAMEOVER   2
+#define FOLDER_SYSTEM     3
+#define FOLDER_REMINDER   4
+#define FOLDER_NEWRND     5
+
+const int ROOT_GAME_TRACK_COUNT  = 12;  // Root: 001..012
+const int GAMEOVER_TRACK_COUNT   = 12;  // 02:   001..012
+const int WELCOME_TRACK_COUNT    = 6;   // 03:   001..006
+const int REMINDER_TRACK_COUNT   = 6;   // 04:   001..006
+const int NEWRND_TRACK_COUNT     = 5;   // 05:   001..005
+
+// ============================================================
+// DEFAULT SOUND SELECTIONS
+// ============================================================
+const uint16_t DEFAULT_GAME_MASK        = 0x003F; // 001-006
+const uint16_t DEFAULT_GAMEOVER_MASK    = 0x003F; // 001-006
+const uint8_t  DEFAULT_WELCOME_MASK     = 0x01;   // nur 001
+const uint8_t  DEFAULT_REMINDER_MASK    = 0x3F;   // 001-006
+const uint8_t  DEFAULT_NEWRND_MASK      = 0x01;   // nur 001
+
+// ============================================================
+// BLUETOOTH LE / APP CONTROL
+// ============================================================
+static const char* BLE_DEVICE_NAME = "Crocosauf Deluxe";
+static const char* BLE_SERVICE_UUID = "7c800001-0dc3-4fd6-9c26-a3821da872bc";
+static const char* BLE_RX_UUID      = "7c800002-0dc3-4fd6-9c26-a3821da872bc";
+static const char* BLE_TX_UUID      = "7c800003-0dc3-4fd6-9c26-a3821da872bc";
+
+Preferences prefs;
+
+BLEServer* bleServer = nullptr;
+BLECharacteristic* bleRx = nullptr;
+BLECharacteristic* bleTx = nullptr;
+
+bool bleStarted = false;
+bool bleConnected = false;
+bool bleApproved = false;
+unsigned long bleConnectedAt = 0;
+
+static const size_t BLE_MAX_LINE = 512;
+static const int BLE_QUEUE_SIZE = 4;
+String bleRxAccum;
+String bleQueue[BLE_QUEUE_SIZE];
+volatile uint8_t bleQHead = 0;
+volatile uint8_t bleQTail = 0;
+
+// App-Freigabe: bei bestehender BLE-Verbindung, Maul geschlossen,
+// Spiel READY und Seitentaster 3 s halten.
+static const unsigned long BLE_APPROVE_HOLD_MS = 3000;
+static const unsigned long BLE_UNAPPROVED_TIMEOUT_MS = 90000;
+unsigned long bleApprovePressStart = 0;
+bool bleApproveTracking = false;
+bool bleButtonArmed = false;
+
+// ============================================================
+// DEEP SLEEP
+// ============================================================
+const uint32_t DEEP_SLEEP_AFTER_MS = 30UL * 60UL * 1000UL;
+RTC_DATA_ATTR uint32_t bootCount = 0;
+RTC_DATA_ATTR uint8_t  lastWakeWasTimer = 0;
+
+// ============================================================
+// SETTINGS (persisted)
+// ============================================================
+uint16_t gameTrackMask   = DEFAULT_GAME_MASK;
+uint16_t gameOverMask    = DEFAULT_GAMEOVER_MASK;
+uint8_t  welcomeMask     = DEFAULT_WELCOME_MASK;
+uint8_t  reminderMask    = DEFAULT_REMINDER_MASK;
+uint8_t  newRndMask      = DEFAULT_NEWRND_MASK;
+
+bool gameTracksRandom     = true;
+bool gameOverRandom       = false;
+bool welcomeRandom        = false;
+bool reminderSoundRandom  = true;
+bool newRndRandom         = false;
+
+// LED Effects
+const int EFFECT_COUNT = 20;
+uint32_t gameEffectMask     = 0x000FFFFF;
+uint32_t reminderEffectMask = (1UL<<1)|(1UL<<4)|(1UL<<10)|(1UL<<11)|(1UL<<15)|(1UL<<18);
+
+bool gameEffectsRandom      = false;
+bool reminderEffectsRandom  = true;
+
+// Display-Animationen (Normal-Spiel) – 20
+const int DISP_ANIM_COUNT = 20;
+uint32_t gameDispMask = 0x000FFFFF;
+bool gameDispRandom   = false;
+
+// Reminder
+bool     reminderEnabled      = true;
+bool     reminderSoundEnabled = true;
+uint32_t reminderIntervalMs   = 8UL * 60UL * 1000UL;
+uint16_t reminderEffectDurationMs = 3500;
+uint32_t reminderLedDurationMs = 3500;
+
+const uint16_t REMINDER_SWAP_MS = 4000;
+bool reminderShowCup = true;
+unsigned long reminderSwapLast = 0;
+
+// ============================================================
+// NEW: DISPLAY ROTATION + AUDIO ENABLE
+// ============================================================
+uint8_t displayRotation = 0;   // 0..3 (0=0°,1=90°,2=180°,3=270°)
+bool audioEnabled = true;      // Web UI toggle
+
+// ============================================================
+// NEW: BRIGHTNESS (percent) persisted
+// ============================================================
+uint8_t ledBrightnessPct     = 100;  // 0..100
+uint8_t displayBrightnessPct = 100;  // 0..100
+
+static inline uint8_t pctToFastLed(uint8_t pct){
+  pct = constrain(pct, 0, 100);
+  return (uint8_t)map(pct, 0, 100, 0, 255);
+}
+static inline uint8_t pctToMatrix(uint8_t pct){
+  pct = constrain(pct, 0, 100);
+  return (uint8_t)map(pct, 0, 100, 0, 15);
+}
+static inline void applyLedBrightness(){
+  FastLED.setBrightness(pctToFastLed(ledBrightnessPct));
+}
+static inline void applyDisplayBrightness(){
+  matrix.setBrightness(pctToMatrix(displayBrightnessPct));
+}
+
+// ============================================================
+// TIMING / GAME
+// ============================================================
+const unsigned long effectInterval          = 4000;
+const unsigned long RED_PHASE_DURATION      = 4000;
+const unsigned long PINCHEN_PHASE_DURATION  = 4000;
+const unsigned long GRUEN_PHASE_DURATION    = 5200;
+
+const unsigned long PINCHEN_BLINK_INTERVAL  = 200;
+
+const uint16_t REED_DEBOUNCE_MS    = 35;
+const uint16_t BUTTON_DEBOUNCE_MS  = 35;
+const uint16_t OPEN_CONFIRM_MS     = 900;
+const uint16_t MODUS_DEBOUNCE_MS   = 40;
+
+const uint16_t PINCH_NUM_BLINK_MS  = 260;
+
+const unsigned long NORMAL_GAMEOVER_CUP_MS = 5000;
+
+// Volume/Mute
+int  volumeLevel          = 20;   // Spiel-Lautstärke
+int  welcomeVolumeLevel   = 20;   // Welcome-Lautstärke (separat)
+int  lastVolumeBeforeMute = 20;
+bool isMuted              = false;
+const int volumeMin       = 5;
+const int volumeMax       = 30;
+
+unsigned long buttonPressStart = 0;
+bool buttonHeld = false;
+const unsigned long muteThreshold = 1000;
+
+bool dfplayerInitOk = false;
+
+// --- Game music guard ---
+unsigned long lastGameMusicCmdMs = 0;
+int currentGameMusicTrack = 0;
+unsigned long dfIdleSinceMs = 0;
+
+// Welcome-Lock
+bool welcomeActive = false;
+unsigned long welcomeStartedMs = 0;
+bool welcomeSawBusyLow = false;
+const unsigned long MIN_WELCOME_MS = 1200;
+bool pendingStartAfterWelcome = false;
+bool pendingStartPinchenMode  = false;
+bool pendingResumeMusicAfterWelcome = false;
+
+// Spielstatus
+bool spielLaeuft         = false;
+bool isGameOver          = false;
+bool gameReady           = true;
+bool pinnchenGezeigt     = false;
+bool neueRundePhase      = false;
+unsigned long neueRundeStart = 0;
+
+// Reminder runtime
+bool reminderRunning = false;
+unsigned long reminderUntilMs = 0;
+int reminderEffectId = 0;
+
+// Pinchenmodus
+const int PINCHEN_TOTAL = 10;
+int  rundeAktuell     = 1;
+int  pinchRoundsDone  = 0;
+
+// 2 LEDs pro Pinchen (0-basiert)
+int  pinnchenLedA[PINCHEN_TOTAL] = { 2,  6, 11, 14, 17, 21, 24, 27, 31, 36 };
+int  pinnchenLedB[PINCHEN_TOTAL] = { 3,  7, 12, 15, 18, 22, 25, 28, 32, 37 };
+
+bool pinnchenVerwendet[PINCHEN_TOTAL] = {false};
+bool lastPinchenModus = false;
+
+// Effects runtime
+int currentEffect   = 0;
+int effectPos       = 0;
+int direction       = 1;
+int hue             = 0;
+int brightness      = 0;
+int brightnessDelta = 5;
+unsigned long lastEffectSwitch  = 0;
+unsigned long lastEffectUpdate  = 0;
+
+// GameOver blink
+unsigned long gameOverStart     = 0;
+unsigned long lastGameOverBlink = 0;
+bool blinkToggle               = false;
+int pinnchenIndex              = -1;
+
+// Reed debounced state
+bool maulOffenStable  = true;
+bool maulOffenLastRaw = true;
+unsigned long maulLastChange = 0;
+
+// Offenzeit tracking
+unsigned long maulOpenSince = 0;
+bool openCandidate = false;
+unsigned long openSince = 0;
+
+// getrennte Activity Timer
+unsigned long lastUserActivityMs = 0;
+unsigned long lastReminderCheckMs = 0;
+
+// ============================================================
+// HW objects
+// ============================================================
+HardwareSerial mp3Serial(2);
+DFPlayerMini_Fast player;
+CRGB leds[NUM_LEDS];
+
+// UI test state
+bool uiPlaying = false;
+int  uiMode = 0;
+int  uiCurrentTrack = 0;
+
+bool uiEffectTesting = false;
+int  uiEffectId = -1;
+
+bool uiDispTesting = false;
+int  uiDispId = -1;
+
+// ============================================================
+// DISPLAY state machine
+// ============================================================
+enum DispMode { DISP_SCROLL, DISP_PINCH_BLINK, DISP_CUP_ANIM, DISP_VOLUME_BARS, DISP_MUTED_ICON, DISP_GAME_ANIM, DISP_REMINDER_ANIM };
+
+DispMode dispMode = DISP_SCROLL;
+String dispText = "CROCOSAUF DELUXE";
+String standbyText = "CROCOSAUF DELUXE";
+int16_t scrollX = 8;
+unsigned long dispLast = 0;
+unsigned long dispUntil = 0;
+
+// Cup animation
+uint8_t cupRepeatTarget = 255;
+uint8_t cupLevel = 0;
+uint8_t cupCycle = 0;
+bool    cupHolding = false;
+unsigned long cupLastStep = 0;
+unsigned long cupHoldStart = 0;
+
+// Normal-Game Display
+uint8_t gameShowId = 0;
+unsigned long gameShowLastSwitch = 0;
+uint8_t gameFrame = 0;
+unsigned long gameFrameLast = 0;
+int forcedGameShow = -1;
+int lastGameShowPick = 0;
+
+// Reminder croc animation
+uint8_t remAnimFrame = 0;
+unsigned long remAnimLast = 0;
+uint8_t remBubbleX = 6;
+uint8_t remBubbleY = 1;
+
+// Pinch blink
+bool pinchBlinkOn = true;
+unsigned long pinchBlinkLast = 0;
+int pinchBlinkTogglesLeft = 0;
+
+// ============================================================
+// Names
+// ============================================================
+static const char* EFFECT_NAMES[EFFECT_COUNT] = {
+  "Blue Scanner","Sparkle White","Green Pulse","Blue Pulse","Rainbow Train",
+  "Rainbow Fill","Grey Static","Double Sparkle","Mirror Yellow","Aqua Fill Up",
+  "Comet White","Rainbow Wave","Rainbow Breath","Color Trail","Cyan Dot",
+  "Confetti","Strobe White","Party Rainbow","Rainbow Glitter","Red/Blue Flip"
+};
+
+static const char* DISP_NAMES[DISP_ANIM_COUNT] = {
+  "Krokodil (Mund auf/zu)","Smiley pulst","Smiley zwinkert","Smiley grinst","Herz schlaegt",
+  "Confetti","Welle","Balken wandert","Checker Flash","Doppelpfeile rechts",
+  "Stern funkelt","Ring dreht","Bouncy Ball","Pacman frisst","Ausrufezeichen blinkt",
+  "LOL Face","Sunglasses Smiley","Question Mark","Fireworks","Mini-Cup blinkt"
+};
+
+// ============================================================
+// BIG DIGITS 3x7
+// ============================================================
+static const uint8_t DIG3x7[10][7] = {
+  {0b111,0b101,0b101,0b101,0b101,0b101,0b111},
+  {0b010,0b110,0b010,0b010,0b010,0b010,0b111},
+  {0b111,0b001,0b001,0b111,0b100,0b100,0b111},
+  {0b111,0b001,0b001,0b111,0b001,0b001,0b111},
+  {0b101,0b101,0b101,0b111,0b001,0b001,0b001},
+  {0b111,0b100,0b100,0b111,0b001,0b001,0b111},
+  {0b111,0b100,0b100,0b111,0b101,0b101,0b111},
+  {0b111,0b001,0b001,0b001,0b001,0b001,0b001},
+  {0b111,0b101,0b101,0b111,0b101,0b101,0b111},
+  {0b111,0b101,0b101,0b111,0b001,0b001,0b111}
+};
+
+static inline void drawDigit3x7(uint8_t d, int x, int y) {
+  if (d > 9) return;
+  for (int r=0;r<7;r++){
+    uint8_t row = DIG3x7[d][r];
+    for (int c=0;c<3;c++){
+      if (row & (1<<(2-c))) matrix.drawPixel(x+c, y+r, LED_ON);
+    }
+  }
+}
+
+static inline void drawNumberCentered(uint8_t n) {
+  const int y = 0;
+  matrix.clear();
+  if (n <= 9) {
+    drawDigit3x7(n, 2, y);
+  } else {
+    drawDigit3x7(1, 0, y);
+    drawDigit3x7(0, 4, y);
+  }
+  matrix.writeDisplay();
+}
+
+// ============================================================
+// Helpers
+// ============================================================
+static bool dfIsBusyPlaying() { return (digitalRead(DFPLAYER_BUSY_PIN) == LOW); }
+
+static void startLoopGameMusicNow(); // forward
+
+static bool audioAvailable() { return (audioEnabled && dfplayerInitOk); }
+
+static void ensureGameMusicIfNeeded(bool maulOffen) {
+  if (!audioAvailable()) return;
+  if (welcomeActive) return;
+  if (isMuted) return;
+  if (!maulOffen) return;
+
+  if (millis() - lastGameMusicCmdMs < 1100) return;
+
+  if (spielLaeuft && !isGameOver && !neueRundePhase && !reminderRunning) {
+    if (dfIsBusyPlaying()) { dfIdleSinceMs = 0; return; }
+
+    if (dfIdleSinceMs == 0) dfIdleSinceMs = millis();
+    if (millis() - dfIdleSinceMs < 800) return;
+
+    startLoopGameMusicNow();
+  }
+}
+
+static bool readDebouncedReedOpen() {
+  bool raw = (digitalRead(MAUL_SENSOR_PIN) == HIGH);
+  unsigned long now = millis();
+  if (raw != maulOffenLastRaw) {
+    maulOffenLastRaw = raw;
+    maulLastChange = now;
+  }
+  if (now - maulLastChange >= REED_DEBOUNCE_MS) maulOffenStable = raw;
+  return maulOffenStable;
+}
+
+static bool readDebouncedButton() {
+  static bool lastRaw = HIGH, stable = HIGH;
+  static unsigned long lastChange = 0;
+  bool raw = digitalRead(VOLUME_TASTER);
+  unsigned long now = millis();
+  if (raw != lastRaw) { lastRaw = raw; lastChange = now; }
+  if (now - lastChange >= BUTTON_DEBOUNCE_MS) stable = raw;
+  return stable;
+}
+
+static bool gameIsBusyForUi() { return (spielLaeuft || isGameOver || neueRundePhase || reminderRunning || welcomeActive); }
+
+static void applyVolumeToPlayer(int vol) {
+  if (!audioAvailable()) return;
+  player.volume(constrain(vol, 0, 30));
+}
+static void applyCurrentGameVolume() {
+  if (!audioAvailable()) return;
+  player.volume(isMuted ? 0 : volumeLevel);
+}
+
+static void uiStopAll() {
+  if (audioAvailable() && !welcomeActive) {
+    player.stop(); delay(120);
+    player.stop(); delay(120);
+  }
+  uiPlaying = false; uiMode = 0; uiCurrentTrack = 0;
+  uiEffectTesting = false; uiEffectId = -1;
+  uiDispTesting = false; uiDispId = -1;
+  forcedGameShow = -1;
+  FastLED.clear(); FastLED.show();
+  dispUntil = 0;
+}
+
+// ============================================================
+// PICKERS
+// ============================================================
+static int pickFromMask_1based(int count, uint32_t mask, bool randomMode, int &lastIdx) {
+  if (count <= 0) return 1;
+
+  uint32_t validMask = mask;
+  if (count < 32) validMask &= ((1UL << count) - 1UL);
+  if (validMask == 0) validMask = (count >= 32) ? 0xFFFFFFFFUL : ((1UL << count) - 1UL);
+
+  if (!randomMode) {
+    for (int step = 1; step <= count; step++) {
+      int idx = ((lastIdx + step - 1) % count) + 1;
+      if (validMask & (1UL << (idx - 1))) { lastIdx = idx; return idx; }
+    }
+    lastIdx = 1; return 1;
+  }
+
+  int candidates[64]; int cnt = 0;
+  for (int i = 1; i <= count; i++) if (validMask & (1UL << (i - 1))) candidates[cnt++] = i;
+  if (cnt == 0) { lastIdx = 1; return 1; }
+
+  if (cnt > 1) {
+    int filtered[64]; int fcnt = 0;
+    for (int i = 0; i < cnt; i++) if (candidates[i] != lastIdx) filtered[fcnt++] = candidates[i];
+    int idx = filtered[random(fcnt)];
+    lastIdx = idx; return idx;
+  }
+
+  lastIdx = candidates[0];
+  return candidates[0];
+}
+
+static int pickEffectFromMask_0based(int count, uint32_t mask, bool randomMode, int &lastId) {
+  if (count <= 0) return 0;
+
+  uint32_t validMask = mask;
+  if (count < 32) validMask &= ((1UL << count) - 1UL);
+  if (validMask == 0) validMask = (count >= 32) ? 0xFFFFFFFFUL : ((1UL << count) - 1UL);
+
+  if (!randomMode) {
+    for (int step = 1; step <= count; step++) {
+      int id = (lastId + step) % count;
+      if (validMask & (1UL << id)) { lastId = id; return id; }
+    }
+    lastId = 0; return 0;
+  }
+
+  int candidates[64]; int cnt = 0;
+  for (int i = 0; i < count; i++) if (validMask & (1UL << i)) candidates[cnt++] = i;
+  if (cnt == 0) { lastId = 0; return 0; }
+
+  if (cnt > 1) {
+    int filtered[64]; int fcnt = 0;
+    for (int i = 0; i < cnt; i++) if (candidates[i] != lastId) filtered[fcnt++] = candidates[i];
+    int id = filtered[random(fcnt)];
+    lastId = id; return id;
+  }
+
+  lastId = candidates[0];
+  return candidates[0];
+}
+
+// ============================================================
+// DISPLAY helpers
+// ============================================================
+static void dispHardClear() { matrix.clear(); matrix.writeDisplay(); }
+
+static int displayedPinchNumber() {
+  if (rundeAktuell < 1) return 1;
+  if (rundeAktuell > 10) return 10;
+  return rundeAktuell;
+}
+
+static void dispSetScroll(const String& text, unsigned long holdMs = 0) {
+  dispMode = DISP_SCROLL;
+  dispText = text;
+  scrollX = 8;
+  dispLast = 0;
+  dispUntil = (holdMs > 0) ? (millis() + holdMs) : 0;
+}
+
+static void dispSetCupAnim(uint8_t repeatTarget, unsigned long holdMs = 0) {
+  dispMode = DISP_CUP_ANIM;
+  cupRepeatTarget = repeatTarget;
+  cupLevel = 0;
+  cupCycle = 0;
+  cupHolding = false;
+  cupLastStep = millis();
+  cupHoldStart = 0;
+  dispUntil = (holdMs > 0) ? (millis() + holdMs) : 0;
+}
+
+static void dispSetReminderAnim() {
+  dispMode = DISP_REMINDER_ANIM;
+  dispUntil = 0;
+  remAnimFrame = 0;
+  remAnimLast = 0;
+  remBubbleX = 6;
+  remBubbleY = 1;
+}
+
+static void dispSetGameAnim() {
+  dispMode = DISP_GAME_ANIM;
+  dispUntil = 0;
+  forcedGameShow = -1;
+  gameShowId = 0;
+  gameShowLastSwitch = 0;
+  gameFrame = 0;
+  gameFrameLast = 0;
+}
+
+static void dispSetGameAnimForced(int id) {
+  dispMode = DISP_GAME_ANIM;
+  dispUntil = 0;
+  forcedGameShow = constrain(id, 0, DISP_ANIM_COUNT-1);
+  gameShowId = forcedGameShow;
+  gameShowLastSwitch = millis();
+  gameFrame = 0;
+  gameFrameLast = 0;
+}
+
+static void showVolumeOnMatrix(unsigned long ms = 1200) {
+  dispMode = DISP_VOLUME_BARS;
+  dispUntil = millis() + ms;
+}
+
+static void showMutedOnMatrix(unsigned long ms = 1200) {
+  dispMode = DISP_MUTED_ICON;
+  dispUntil = millis() + ms;
+}
+
+static void dispSetPinchBlink() {
+  dispMode = DISP_PINCH_BLINK;
+  dispUntil = 0;
+  pinchBlinkOn = true;
+  pinchBlinkLast = millis();
+  pinchBlinkTogglesLeft = 6;
+}
+
+// ============================================================
+// DISPLAY render
+// ============================================================
+static void dispRender() {
+  if (dispUntil != 0 && millis() > dispUntil) {
+    dispUntil = 0;
+
+    if (reminderRunning) {
+      if (reminderShowCup) dispSetCupAnim(255, 0);
+      else dispSetReminderAnim();
+      return;
+    }
+
+    if (isGameOver && (digitalRead(MODUS_PIN) != LOW)) {
+      dispSetScroll(standbyText);
+      return;
+    }
+
+    if (digitalRead(MODUS_PIN) == LOW) { dispSetPinchBlink(); return; }
+    if (spielLaeuft) { dispSetGameAnim(); return; }
+    dispSetScroll(standbyText);
+    return;
+  }
+
+  if (millis() - dispLast < 70) return;
+  dispLast = millis();
+
+  if (dispMode == DISP_PINCH_BLINK) {
+    unsigned long now = millis();
+    if (pinchBlinkTogglesLeft > 0) {
+      if (now - pinchBlinkLast >= PINCH_NUM_BLINK_MS) {
+        pinchBlinkLast = now;
+        pinchBlinkOn = !pinchBlinkOn;
+        pinchBlinkTogglesLeft--;
+        if (pinchBlinkTogglesLeft == 0) pinchBlinkOn = true;
+      }
+      if (pinchBlinkOn) drawNumberCentered((uint8_t)displayedPinchNumber());
+      else dispHardClear();
+    } else {
+      drawNumberCentered((uint8_t)displayedPinchNumber());
+    }
+    return;
+  }
+
+  if (dispMode == DISP_GAME_ANIM) {
+    const unsigned long SWITCH_MS = 1000;
+    const unsigned long FRAME_MS  = 110;
+    unsigned long now = millis();
+
+    if (gameShowLastSwitch == 0) gameShowLastSwitch = now;
+    if (gameFrameLast == 0) gameFrameLast = now;
+
+    if (forcedGameShow < 0) {
+      if (now - gameShowLastSwitch >= SWITCH_MS) {
+        gameShowLastSwitch = now;
+        gameShowId = (uint8_t)pickEffectFromMask_0based(DISP_ANIM_COUNT, (uint32_t)gameDispMask, gameDispRandom, lastGameShowPick);
+        gameFrame = 0;
+        gameFrameLast = now;
+      }
+    } else {
+      gameShowId = (uint8_t)forcedGameShow;
+    }
+
+    if (now - gameFrameLast >= FRAME_MS) { gameFrameLast = now; gameFrame++; }
+
+    matrix.clear();
+    auto drawSmiley = [&](bool wink, bool bigSmile){
+      matrix.drawPixel(2,2,LED_ON);
+      matrix.drawPixel(5,2,LED_ON);
+      if (wink) { matrix.drawPixel(5,2,LED_OFF); matrix.drawPixel(5,3,LED_ON); }
+      if (bigSmile) {
+        matrix.drawPixel(2,5,LED_ON); matrix.drawPixel(3,6,LED_ON);
+        matrix.drawPixel(4,6,LED_ON); matrix.drawPixel(5,5,LED_ON);
+      } else {
+        matrix.drawLine(2,6,5,6,LED_ON);
+      }
+    };
+
+    switch (gameShowId) {
+      case 0: {
+        bool wink = ((gameFrame % 10) == 3 || (gameFrame % 10) == 4);
+        bool mouthOpen = ((gameFrame % 12) >= 6);
+        matrix.drawPixel(2,2,LED_ON); matrix.drawPixel(2,3,LED_ON);
+        if (!wink) { matrix.drawPixel(5,2,LED_ON); matrix.drawPixel(5,3,LED_ON); }
+        else { matrix.drawPixel(5,3,LED_ON); }
+        if (!mouthOpen) matrix.drawLine(2,6,5,6,LED_ON);
+        else {
+          matrix.drawLine(2,5,5,5,LED_ON);
+          matrix.drawPixel(2,6,LED_ON); matrix.drawPixel(5,6,LED_ON);
+        }
+        break;
+      }
+      case 1: drawSmiley(false, ((gameFrame % 8) < 4)); break;
+      case 2: drawSmiley(((gameFrame % 10) < 3), true); break;
+      case 3: {
+        matrix.drawPixel(2,2,LED_ON); matrix.drawPixel(5,2,LED_ON);
+        bool open=((gameFrame%8)<4);
+        if(open){
+          matrix.drawLine(2,5,5,5,LED_ON); matrix.drawPixel(2,6,LED_ON); matrix.drawPixel(5,6,LED_ON);
+        } else matrix.drawLine(2,6,5,6,LED_ON);
+        break;
+      }
+      case 4: {
+        bool big=((gameFrame%10)<5);
+        if(!big){
+          matrix.drawPixel(3,2,LED_ON); matrix.drawPixel(4,2,LED_ON);
+          matrix.drawPixel(2,3,LED_ON); matrix.drawPixel(5,3,LED_ON);
+          matrix.drawPixel(3,3,LED_ON); matrix.drawPixel(4,3,LED_ON);
+          matrix.drawPixel(3,4,LED_ON); matrix.drawPixel(4,4,LED_ON);
+          matrix.drawPixel(3,5,LED_ON); matrix.drawPixel(4,5,LED_ON);
+        } else {
+          matrix.drawPixel(2,2,LED_ON); matrix.drawPixel(5,2,LED_ON);
+          matrix.drawPixel(1,3,LED_ON); matrix.drawPixel(6,3,LED_ON);
+          matrix.drawLine(2,4,5,4,LED_ON);
+          matrix.drawPixel(3,5,LED_ON); matrix.drawPixel(4,5,LED_ON);
+          matrix.drawPixel(3,6,LED_ON); matrix.drawPixel(4,6,LED_ON);
+        }
+        break;
+      }
+      case 5: for(int i=0;i<12;i++) matrix.drawPixel(random(8),random(8),LED_ON); break;
+      case 6: { uint8_t p=gameFrame%8; matrix.drawPixel(p,2,LED_ON); matrix.drawPixel((p+2)%8,3,LED_ON);
+                matrix.drawPixel((p+4)%8,4,LED_ON); matrix.drawPixel((p+6)%8,5,LED_ON); break; }
+      case 7: { uint8_t x=gameFrame%8; for(int y=1;y<7;y++) matrix.drawPixel(x,y,LED_ON); break; }
+      case 8: { bool inv=((gameFrame%6)<3);
+                for(int y=0;y<8;y++)for(int x=0;x<8;x++){ bool on=((x+y)&1); if(inv)on=!on; if(on)matrix.drawPixel(x,y,LED_ON); }
+                break; }
+      case 9: { int shift=gameFrame%3;
+                matrix.drawPixel(1+shift,3,LED_ON);
+                matrix.drawPixel(2+shift,2,LED_ON); matrix.drawPixel(2+shift,3,LED_ON); matrix.drawPixel(2+shift,4,LED_ON);
+                matrix.drawPixel(3+shift,3,LED_ON);
+                matrix.drawPixel(4+shift,3,LED_ON);
+                matrix.drawPixel(5+shift,2,LED_ON); matrix.drawPixel(5+shift,3,LED_ON); matrix.drawPixel(5+shift,4,LED_ON);
+                matrix.drawPixel(6+shift,3,LED_ON);
+                break; }
+      case 10:{ static const uint8_t stars[5][2]={{1,1},{6,1},{2,5},{5,6},{3,3}};
+                int k=gameFrame%5; for(int i=0;i<5;i++) matrix.drawPixel(stars[i][0],stars[i][1],LED_ON);
+                if((gameFrame%2)==0){ matrix.drawPixel(max(0,(int)stars[k][0]-1),stars[k][1],LED_ON); matrix.drawPixel(min(7,(int)stars[k][0]+1),stars[k][1],LED_ON); }
+                break; }
+      case 11:{ int f=gameFrame%8; static const uint8_t ring[8][2]={{3,1},{4,1},{6,3},{6,4},{4,6},{3,6},{1,4},{1,3}};
+                for(int i=0;i<8;i+=2){ int idx=(i+f)%8; matrix.drawPixel(ring[idx][0],ring[idx][1],LED_ON); }
+                break; }
+      case 12:{ int x=gameFrame%8; int y=(gameFrame/2)%6; y=(y<=3)?y:(6-y); matrix.drawPixel(x,y+1,LED_ON); matrix.drawPixel(x,y+2,LED_ON); break; }
+      case 13:{ int x=gameFrame%9; bool mouth=((gameFrame%6)<3); int px=min(x,7);
+                matrix.drawPixel(px,3,LED_ON); matrix.drawPixel(px,4,LED_ON);
+                matrix.drawPixel(max(px-1,0),3,LED_ON); matrix.drawPixel(max(px-1,0),4,LED_ON);
+                if(mouth) matrix.drawPixel(px,3,LED_OFF);
+                for(int i=px+1;i<8;i+=2) matrix.drawPixel(i,3,LED_ON);
+                break; }
+      case 14:{ bool on=((gameFrame%6)<3); if(on){ matrix.drawLine(4,1,4,5,LED_ON); matrix.drawPixel(4,7,LED_ON);} break; }
+      case 15:{ matrix.drawPixel(2,2,LED_ON); matrix.drawPixel(5,2,LED_ON);
+                matrix.drawPixel(1,4,LED_ON); matrix.drawPixel(6,4,LED_ON);
+                bool mouth=((gameFrame%8)<4); if(mouth){ matrix.drawPixel(2,6,LED_ON); matrix.drawPixel(5,6,LED_ON); matrix.drawPixel(3,7,LED_ON); matrix.drawPixel(4,7,LED_ON);}
+                else matrix.drawLine(2,6,5,6,LED_ON);
+                break; }
+      case 16:{ matrix.drawLine(1,2,6,2,LED_ON); matrix.drawPixel(3,2,LED_ON); matrix.drawPixel(4,2,LED_ON);
+                matrix.drawPixel(2,6,LED_ON); matrix.drawPixel(3,7,LED_ON); matrix.drawPixel(4,7,LED_ON); matrix.drawPixel(5,6,LED_ON); break; }
+      case 17:{ bool blink=((gameFrame%10)<7); if(blink){ matrix.drawPixel(3,1,LED_ON); matrix.drawPixel(4,1,LED_ON); matrix.drawPixel(5,2,LED_ON);
+                                                        matrix.drawPixel(4,3,LED_ON); matrix.drawPixel(4,4,LED_ON); matrix.drawPixel(4,6,LED_ON);} break; }
+      case 18:{ int cx=3+((gameFrame/6)%2); int cy=3; int phase=gameFrame%6;
+                matrix.drawPixel(cx,cy,LED_ON);
+                if(phase>=1){matrix.drawPixel(cx-1,cy,LED_ON);matrix.drawPixel(cx+1,cy,LED_ON);}
+                if(phase>=2){matrix.drawPixel(cx,cy-1,LED_ON);matrix.drawPixel(cx,cy+1,LED_ON);}
+                if(phase>=3){matrix.drawPixel(cx-1,cy-1,LED_ON);matrix.drawPixel(cx+1,cy+1,LED_ON);}
+                if(phase>=4){matrix.drawPixel(cx+1,cy-1,LED_ON);matrix.drawPixel(cx-1,cy+1,LED_ON);}
+                if(phase>=5){matrix.drawPixel(random(8),random(8),LED_ON);}
+                break; }
+      case 19:{ bool on=((gameFrame%8)<4); if(on){
+                matrix.drawRect(2,2,4,5,LED_ON); matrix.drawPixel(6,3,LED_ON); matrix.drawPixel(6,4,LED_ON);
+                int lvl=(gameFrame%4); for(int y=6;y>=6-lvl;y--) matrix.drawLine(3,y,4,y,LED_ON);
+              } break; }
+    }
+
+    matrix.writeDisplay();
+    return;
+  }
+
+  if (dispMode == DISP_REMINDER_ANIM) {
+    const unsigned long STEP_MS = 180;
+    unsigned long now = millis();
+    if (remAnimLast == 0 || (now - remAnimLast >= STEP_MS)) {
+      remAnimLast = now;
+      remAnimFrame ^= 1;
+      if (remBubbleY == 0) { remBubbleY = 2; remBubbleX = (uint8_t)random(5, 8); }
+      else remBubbleY--;
+    }
+    matrix.clear();
+    matrix.drawPixel(5,2,LED_ON); matrix.drawPixel(7,2,LED_ON);
+    matrix.drawLine(4,3,7,3,LED_ON);
+    matrix.drawPixel(4,4,LED_ON);
+    matrix.drawLine(1,4,3,4,LED_ON);
+    if (remAnimFrame == 0) matrix.drawLine(1,5,3,5,LED_ON);
+    else { matrix.drawLine(1,5,3,5,LED_ON); matrix.drawLine(1,6,3,6,LED_ON); }
+    matrix.drawPixel(remBubbleX, remBubbleY, LED_ON);
+    matrix.writeDisplay();
+    return;
+  }
+
+  matrix.clear();
+  matrix.setTextWrap(false);
+  matrix.setTextSize(1);
+  matrix.setTextColor(LED_ON);
+
+  if (dispMode == DISP_SCROLL) {
+    matrix.setCursor(scrollX, 1);
+    matrix.print(dispText);
+    matrix.writeDisplay();
+    scrollX--;
+    int16_t minX = -(int16_t)dispText.length() * 6;
+    if (scrollX < minX) scrollX = 8;
+    return;
+  }
+
+  if (dispMode == DISP_VOLUME_BARS) {
+    int bars = map(volumeLevel, 0, 30, 0, 8);
+    bars = constrain(bars, 0, 8);
+    for (int x = 0; x < 8; x++) if (x < bars) for (int y = 7; y >= 0; y--) matrix.drawPixel(x, y, LED_ON);
+    matrix.writeDisplay();
+    return;
+  }
+
+  if (dispMode == DISP_MUTED_ICON) {
+    matrix.drawPixel(1,3,LED_ON); matrix.drawPixel(1,4,LED_ON);
+    matrix.drawPixel(2,2,LED_ON); matrix.drawPixel(2,3,LED_ON); matrix.drawPixel(2,4,LED_ON); matrix.drawPixel(2,5,LED_ON);
+    matrix.drawPixel(3,1,LED_ON); matrix.drawPixel(3,2,LED_ON); matrix.drawPixel(3,5,LED_ON); matrix.drawPixel(3,6,LED_ON);
+    matrix.drawPixel(5,2,LED_ON); matrix.drawPixel(6,3,LED_ON); matrix.drawPixel(7,4,LED_ON);
+    matrix.drawPixel(7,3,LED_ON); matrix.drawPixel(6,4,LED_ON); matrix.drawPixel(5,5,LED_ON);
+    matrix.writeDisplay();
+    return;
+  }
+
+  if (dispMode == DISP_CUP_ANIM) {
+    const unsigned long STEP_MS = 160;
+    const unsigned long HOLD_FULL_MS = 650;
+    unsigned long now = millis();
+
+    matrix.drawRect(2, 1, 4, 6, LED_ON);
+    matrix.drawPixel(6, 2, LED_ON);
+    matrix.drawPixel(6, 3, LED_ON);
+    matrix.drawPixel(6, 4, LED_ON);
+
+    bool loopForever = (cupRepeatTarget == 255);
+
+    if (!cupHolding) {
+      if (now - cupLastStep >= STEP_MS) {
+        cupLastStep = now;
+        if (cupLevel < 4) cupLevel++;
+        else { cupHolding = true; cupHoldStart = now; }
+      }
+    } else {
+      if (now - cupHoldStart >= HOLD_FULL_MS) {
+        cupCycle++;
+        if (loopForever) {
+          cupLevel = 0; cupHolding = false; cupLastStep = now; cupCycle = 0;
+        } else {
+          if (cupCycle < cupRepeatTarget) { cupLevel = 0; cupHolding = false; cupLastStep = now; }
+          else cupLevel = 4;
+        }
+      }
+    }
+
+    for (int y = 6; y >= 6 - cupLevel + 1; y--) matrix.drawLine(3, y, 4, y, LED_ON);
+    matrix.writeDisplay();
+    return;
+  }
+}
+
+// ============================================================
+// Welcome lock update
+// ============================================================
+static void updateWelcomeState() {
+  if (!welcomeActive) return;
+  unsigned long now = millis();
+
+  if (!welcomeSawBusyLow) {
+    if (dfIsBusyPlaying()) welcomeSawBusyLow = true;
+    return;
+  }
+
+  if (!dfIsBusyPlaying() && (now - welcomeStartedMs) >= MIN_WELCOME_MS) {
+    welcomeActive = false;
+    applyCurrentGameVolume();
+  }
+}
+
+// ============================================================
+// Volume/mute
+// ============================================================
+static void handleVolumeAndMute(bool maulOffen) {
+  if (!maulOffen) return;
+
+  bool buttonState = readDebouncedButton();
+  static bool lastStable = HIGH;
+
+  if (buttonState == LOW && lastStable == HIGH) { buttonPressStart = millis(); buttonHeld = false; }
+
+  if (buttonState == LOW && !buttonHeld && (millis() - buttonPressStart >= muteThreshold)) {
+    buttonHeld = true;
+    isMuted = !isMuted;
+
+    if (isMuted) {
+      lastVolumeBeforeMute = max(volumeLevel, volumeMin);
+      volumeLevel = 0;
+      applyCurrentGameVolume();
+      ensureGameMusicIfNeeded(maulOffen);
+      showMutedOnMatrix();
+    } else {
+      volumeLevel = lastVolumeBeforeMute;
+      isMuted = false;
+      applyCurrentGameVolume();
+      showVolumeOnMatrix();
+    }
+    prefs.putInt("vol", volumeLevel);
+    prefs.putBool("mut", isMuted);
+    lastUserActivityMs = millis();
+  }
+
+  if (buttonState == HIGH && lastStable == LOW && !buttonHeld) {
+    int v = volumeLevel;
+    if (isMuted) v = lastVolumeBeforeMute;
+    v += 5;
+    if (v > volumeMax) v = volumeMin;
+    volumeLevel = v;
+    isMuted = false;
+    applyCurrentGameVolume();
+    ensureGameMusicIfNeeded(maulOffen);
+    showVolumeOnMatrix();
+    prefs.putInt("vol", volumeLevel);
+    prefs.putBool("mut", isMuted);
+    lastUserActivityMs = millis();
+  }
+
+  lastStable = buttonState;
+}
+
+// ============================================================
+// LED Effects
+// ============================================================
+static void resetEffects() { effectPos = 0; direction = 1; hue = 0; brightness = 0; brightnessDelta = 5; }
+
+static void effect_render(int id) {
+  if (millis() - lastEffectUpdate < 30) return;
+  lastEffectUpdate = millis();
+
+  switch (id) { case 10: case 13: case 15: case 16: case 17: case 18: break; default: FastLED.clear(); break; }
+
+  switch (id) {
+    case 0: { leds[effectPos] = CRGB::Blue; effectPos += direction; if (effectPos == NUM_LEDS - 1 || effectPos == 0) direction = -direction; break; }
+    case 1: leds[random(NUM_LEDS)] = CRGB::White; break;
+    case 2: { brightness += brightnessDelta; if (brightness <= 0 || brightness >= 255) brightnessDelta = -brightnessDelta; fill_solid(leds, NUM_LEDS, CRGB(0, brightness, 0)); break; }
+    case 3: { brightness += brightnessDelta; if (brightness <= 0 || brightness >= 255) brightnessDelta = -brightnessDelta; fill_solid(leds, NUM_LEDS, CRGB(0, 0, brightness)); break; }
+    case 4: { for (int i = 0; i < NUM_LEDS; i++) leds[(effectPos + i) % NUM_LEDS] = CHSV(i * (255 / NUM_LEDS), 255, 255); effectPos = (effectPos + 1) % NUM_LEDS; break; }
+    case 5: { for (int i = 0; i < NUM_LEDS; i++) leds[i] = CHSV((i * 20 + hue) % 255, 255, 255); hue++; break; }
+    case 6: for (int i = 0; i < NUM_LEDS; i++) leds[i] = CHSV(0, 0, random8(80, 255)); break;
+    case 7: leds[random(NUM_LEDS)] = CRGB::White; leds[random(NUM_LEDS)] = CRGB::White; break;
+    case 8: { static int b=0; leds[b]=CRGB::Yellow; leds[NUM_LEDS-1-b]=CRGB::Yellow; b=(b+1)%NUM_LEDS; break; }
+    case 9: { static int f=0; for(int j=0;j<=f && j<NUM_LEDS;j++) leds[j]=CRGB::Aqua; f=(f+1)%(NUM_LEDS+1); break; }
+    case 10:{ fadeToBlackBy(leds,NUM_LEDS,50); static int m=0; leds[m]=CRGB::White; m=(m+1)%NUM_LEDS; break; }
+    case 11:{ static uint8_t s=0; s+=2; for(int i=0;i<NUM_LEDS;i++) leds[i]=CHSV(s+i*10,255,255); break; }
+    case 12:{ static uint8_t fx=0; fx+=2; for(int i=0;i<NUM_LEDS;i++) leds[i]=CHSV(fx+i*12,255,sin8((millis()/5)+i*20)); break; }
+    case 13:{ fadeToBlackBy(leds,NUM_LEDS,60); static int p=0; static uint8_t sh=0; sh+=4; leds[p]=CHSV(sh,255,255); p=(p+1)%NUM_LEDS; break; }
+    case 14:{ static int u=0; leds[u]=CRGB::Cyan; u=(u+1)%NUM_LEDS; break; }
+    case 15:{ fadeToBlackBy(leds,NUM_LEDS,20); int pos=random(NUM_LEDS); leds[pos]+=CHSV(random8(),200,255); break; }
+    case 16:{ fadeToBlackBy(leds,NUM_LEDS,80); static int t=0; for(int i=0;i<NUM_LEDS;i+=3){int idx=(i+t)%NUM_LEDS; leds[idx]=CRGB::White;} t=(t+1)%3; break; }
+    case 17:{ static uint8_t base=0; base+=4; for(int i=0;i<NUM_LEDS;i++){ uint8_t wave=sin8((uint8_t)(base+i*18)); leds[i]=CHSV((uint8_t)(base+i*9),255,wave);} if(random8()<120) leds[random(NUM_LEDS)]=CRGB::White; if(random8()<80) leds[random(NUM_LEDS)]+=CHSV(random8(),200,255); break; }
+    case 18:{ fadeToBlackBy(leds,NUM_LEDS,40); static uint8_t base=0; base+=2; int pos=random(NUM_LEDS); leds[pos]=CHSV(base+random8(64),255,255); break; }
+    case 19:{ static bool flip=false; flip=!flip; fill_solid(leds,NUM_LEDS, flip?CRGB::Red:CRGB::Blue); break; }
+  }
+
+  FastLED.show();
+}
+
+// ============================================================
+// Pinchen / GameOver blink
+// ============================================================
+static int findeNaechstesPinnchen() {
+  while (true) {
+    int idx = random(PINCHEN_TOTAL);
+    if (!pinnchenVerwendet[idx]) return idx;
+  }
+}
+
+static void blinkGameOver(bool pinchenAktiv) {
+  unsigned long now = millis();
+  if (now - lastGameOverBlink > PINCHEN_BLINK_INTERVAL) {
+    blinkToggle = !blinkToggle;
+    lastGameOverBlink = now;
+  }
+  FastLED.clear();
+
+  if (now - gameOverStart < RED_PHASE_DURATION) {
+    if (blinkToggle) fill_solid(leds, NUM_LEDS, CRGB::Red);
+  } else if (pinchenAktiv && (now - gameOverStart < RED_PHASE_DURATION + PINCHEN_PHASE_DURATION)) {
+    if (!pinnchenGezeigt) {
+      pinnchenIndex = findeNaechstesPinnchen();
+      pinnchenVerwendet[pinnchenIndex] = true;
+      pinnchenGezeigt = true;
+    }
+    if (blinkToggle) {
+      int a = pinnchenLedA[pinnchenIndex];
+      int b = pinnchenLedB[pinnchenIndex];
+      if (a >= 0 && a < NUM_LEDS) leds[a] = CRGB::Cyan;
+      if (b >= 0 && b < NUM_LEDS) leds[b] = CRGB::Cyan;
+    }
+  }
+  FastLED.show();
+}
+
+// ============================================================
+// Reminder
+// ============================================================
+static void reminderStop() {
+  reminderRunning = false;
+  reminderUntilMs = 0;
+  reminderShowCup = true;
+  FastLED.clear(); FastLED.show();
+  dispUntil = 0;
+  if (digitalRead(MODUS_PIN) == LOW) dispSetPinchBlink();
+  else dispSetScroll(standbyText);
+}
+
+static void reminderStart() {
+  reminderRunning = true;
+  static int lastRemEff = 0;
+  reminderEffectId = pickEffectFromMask_0based(EFFECT_COUNT, reminderEffectMask, reminderEffectsRandom, lastRemEff);
+  resetEffects();
+  lastEffectUpdate = 0;
+
+  reminderUntilMs = millis() + reminderLedDurationMs;
+
+  reminderShowCup = true;
+  reminderSwapLast = millis();
+  dispSetCupAnim(255, 0);
+
+  if (audioAvailable() && reminderSoundEnabled && !isMuted && !welcomeActive) {
+    static int lastRemTrack = 1;
+    int t = pickFromMask_1based(REMINDER_TRACK_COUNT, reminderMask, reminderSoundRandom, lastRemTrack);
+    player.stop(); delay(120);
+    applyCurrentGameVolume(); delay(120);
+    player.playFolder(FOLDER_REMINDER, t);
+  }
+}
+
+// ============================================================
+// DeepSleep
+// ============================================================
+static void enterDeepSleepNow() {
+  if (digitalRead(MAUL_SENSOR_PIN) == HIGH) return;
+  if (bleConnected) return;
+
+  reminderStop();
+  uiStopAll();
+  if (audioAvailable() && !welcomeActive) { player.stop(); delay(120); }
+
+  if (bleStarted) {
+    BLEDevice::deinit(true);
+    bleStarted = false;
+    bleConnected = false;
+    bleApproved = false;
+  }
+
+  rtc_gpio_deinit((gpio_num_t)MAUL_SENSOR_PIN);
+  rtc_gpio_set_direction((gpio_num_t)MAUL_SENSOR_PIN, RTC_GPIO_MODE_INPUT_ONLY);
+  rtc_gpio_pullup_en((gpio_num_t)MAUL_SENSOR_PIN);
+  rtc_gpio_pulldown_dis((gpio_num_t)MAUL_SENSOR_PIN);
+
+  esp_sleep_enable_ext0_wakeup((gpio_num_t)MAUL_SENSOR_PIN, 1);
+  if (reminderEnabled) esp_sleep_enable_timer_wakeup((uint64_t)reminderIntervalMs * 1000ULL);
+
+  delay(50);
+  esp_deep_sleep_start();
+}
+
+// ============================================================
+// Music helpers
+// ============================================================
+static void startLoopGameMusicNow() {
+  if (!audioAvailable()) return;
+  if (isMuted) return;
+
+  if (welcomeActive) { pendingResumeMusicAfterWelcome = true; return; }
+
+  unsigned long now = millis();
+  if (now - lastGameMusicCmdMs < 900) return;
+
+  if (currentGameMusicTrack <= 0) {
+    static int lastGame = 1;
+    currentGameMusicTrack = pickFromMask_1based(ROOT_GAME_TRACK_COUNT, gameTrackMask, gameTracksRandom, lastGame);
+  }
+
+  lastGameMusicCmdMs = now;
+  dfIdleSinceMs = 0;
+
+  player.stop(); delay(180);
+  applyCurrentGameVolume(); delay(120);
+  player.loop(currentGameMusicTrack);
+}
+
+static void playNewRoundSoundNow() {
+  if (!audioAvailable()) return;
+  if (isMuted) return;
+  if (welcomeActive) return;
+
+  static int lastNR = 1;
+  int t = pickFromMask_1based(NEWRND_TRACK_COUNT, newRndMask, newRndRandom, lastNR);
+
+  player.stop(); delay(120);
+  applyCurrentGameVolume(); delay(120);
+  player.playFolder(FOLDER_NEWRND, t);
+}
+
+// ============================================================
+// Game start
+// ============================================================
+static void startGameNow(bool pinchenModus) {
+  if (welcomeActive) {
+    pendingStartAfterWelcome = true;
+    pendingStartPinchenMode = pinchenModus;
+    return;
+  }
+
+  spielLaeuft = true;
+  gameReady   = false;
+  lastUserActivityMs = millis();
+
+  currentGameMusicTrack = 0;
+  dfIdleSinceMs = 0;
+
+  uiPlaying = false; uiMode = 0; uiCurrentTrack = 0;
+  uiEffectTesting = false; uiEffectId = -1;
+  uiDispTesting = false;   uiDispId = -1;
+  forcedGameShow = -1;
+
+  if (pinchenModus) dispSetPinchBlink();
+  else dispSetGameAnim();
+
+  startLoopGameMusicNow();
+
+  resetEffects();
+  lastEffectSwitch = millis();
+  static int lastGE = 0;
+  currentEffect = pickEffectFromMask_0based(EFFECT_COUNT, gameEffectMask, gameEffectsRandom, lastGE);
+
+  FastLED.clear(); FastLED.show();
+}
+
+static void tryAutoStartIfAlreadyOpen(bool pinchenModus, bool maulOffen) {
+  if (!maulOffen) { openCandidate = false; return; }
+  if (!gameReady || spielLaeuft || isGameOver || neueRundePhase || reminderRunning) return;
+
+  if (welcomeActive) { pendingStartAfterWelcome = true; pendingStartPinchenMode = pinchenModus; return; }
+
+  if (millis() - maulOpenSince >= OPEN_CONFIRM_MS) {
+    openCandidate = false;
+    startGameNow(pinchenModus);
+  } else {
+    openCandidate = true;
+    openSince = maulOpenSince;
+  }
+}
+
+// ============================================================
+// MODE SWITCH
+// ============================================================
+static void switchToPinchenMode(bool maulOffen) {
+  dispHardClear();
+  for (int i = 0; i < PINCHEN_TOTAL; i++) pinnchenVerwendet[i] = false;
+
+  pinchRoundsDone = 0;
+  rundeAktuell   = 1;
+
+  isGameOver     = false;
+  spielLaeuft    = false;
+  gameReady      = true;
+  neueRundePhase = false;
+  openCandidate  = false;
+
+  reminderStop();
+  uiStopAll();
+  FastLED.clear(); FastLED.show();
+
+  dispSetPinchBlink();
+  lastUserActivityMs = millis();
+
+  tryAutoStartIfAlreadyOpen(true, maulOffen);
+}
+
+static void switchToNormalMode(bool maulOffen) {
+  for (int i = 0; i < PINCHEN_TOTAL; i++) pinnchenVerwendet[i] = false;
+
+  pinchRoundsDone = 0;
+  rundeAktuell = 1;
+
+  pinnchenGezeigt = false;
+  neueRundePhase = false;
+
+  uiStopAll();
+  reminderStop();
+
+  if (isGameOver) {
+    dispSetCupAnim(255, NORMAL_GAMEOVER_CUP_MS);
+  } else if (spielLaeuft && maulOffen) {
+    dispSetGameAnim();
+    startLoopGameMusicNow();
+  } else {
+    FastLED.clear(); FastLED.show();
+    dispHardClear();
+    dispSetScroll(standbyText);
+  }
+
+  lastUserActivityMs = millis();
+  tryAutoStartIfAlreadyOpen(false, maulOffen);
+}
+
+// ============================================================
+// Pinchen advance
+// ============================================================
+static inline void pinchenAdvanceAfterGameOver(bool maulOffen) {
+  pinchRoundsDone++;
+
+  if (pinchRoundsDone >= PINCHEN_TOTAL) {
+    pinchRoundsDone = 0;
+    rundeAktuell = 1;
+
+    for (int i = 0; i < PINCHEN_TOTAL; i++) pinnchenVerwendet[i] = false;
+
+    playNewRoundSoundNow();
+
+    neueRundePhase = true;
+    neueRundeStart = millis();
+    dispSetScroll("NEUE RUNDE", GRUEN_PHASE_DURATION + 1000);
+    lastUserActivityMs = millis();
+
+  } else {
+    rundeAktuell = pinchRoundsDone + 1;
+
+    gameReady = true;
+    dispSetPinchBlink();
+    lastUserActivityMs = millis();
+    tryAutoStartIfAlreadyOpen(true, maulOffen);
+  }
+}
+
+// ============================================================
+// BLE APP API
+// Protocol: "ID /path?params\n"  ->  "ID HTTP_CODE body\n"
+// ============================================================
+static String jsonEscape(const String& in) {
+  String out; out.reserve(in.length() + 8);
+  for (size_t i=0; i<in.length(); i++) {
+    char c = in[i];
+    if (c == '\\' || c == '"') { out += '\\'; out += c; }
+    else if (c == '\n') out += "\\n";
+    else if (c == '\r') out += "\\r";
+    else if ((uint8_t)c >= 0x20) out += c;
+  }
+  return out;
+}
+
+static int hexNibble(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
+}
+
+static String urlDecode(const String& in) {
+  String out; out.reserve(in.length());
+  for (size_t i=0; i<in.length(); i++) {
+    char c = in[i];
+    if (c == '+') out += ' ';
+    else if (c == '%' && i + 2 < in.length()) {
+      int a = hexNibble(in[i+1]);
+      int b = hexNibble(in[i+2]);
+      if (a >= 0 && b >= 0) { out += (char)((a << 4) | b); i += 2; }
+      else out += c;
+    } else out += c;
+  }
+  return out;
+}
+
+static String queryArg(const String& query, const String& key, const String& def = "") {
+  int pos = 0;
+  while (pos <= (int)query.length()) {
+    int amp = query.indexOf('&', pos);
+    if (amp < 0) amp = query.length();
+    String part = query.substring(pos, amp);
+    int eq = part.indexOf('=');
+    String k = (eq >= 0) ? part.substring(0, eq) : part;
+    String v = (eq >= 0) ? part.substring(eq + 1) : "";
+    if (k == key) return urlDecode(v);
+    pos = amp + 1;
+    if (amp >= (int)query.length()) break;
+  }
+  return def;
+}
+
+static bool queryHas(const String& query, const String& key) {
+  int pos = 0;
+  while (pos <= (int)query.length()) {
+    int amp = query.indexOf('&', pos);
+    if (amp < 0) amp = query.length();
+    String part = query.substring(pos, amp);
+    int eq = part.indexOf('=');
+    String k = (eq >= 0) ? part.substring(0, eq) : part;
+    if (k == key) return true;
+    pos = amp + 1;
+    if (amp >= (int)query.length()) break;
+  }
+  return false;
+}
+
+static bool argTruthy(const String& query, const String& key) {
+  if (!queryHas(query, key)) return false;
+  String v = queryArg(query, key, "1");
+  v.toLowerCase();
+  return !(v == "0" || v == "false" || v == "off" || v == "no");
+}
+
+static uint32_t maskFromQuery(const String& query, int count) {
+  uint32_t m = 0;
+  for (int i=0; i<count && i<32; i++) {
+    String key = "m" + String(i);
+    if (queryHas(query, key) && argTruthy(query, key)) m |= (1UL << i);
+  }
+  return m;
+}
+
+static String stateName() {
+  if (welcomeActive) return "WELCOME";
+  if (reminderRunning) return "REMINDER";
+  if (neueRundePhase) return "NEWROUND";
+  if (isGameOver) return "GAMEOVER";
+  if (spielLaeuft) return "PLAYING";
+  if (gameReady) return "READY";
+  return "IDLE";
+}
+
+static void bleNotifyRaw(const String& msg) {
+  if (!bleConnected || bleTx == nullptr) return;
+  const int CHUNK = 20; // kompatibel ohne MTU-Aushandlung
+  for (int pos=0; pos<(int)msg.length(); pos += CHUNK) {
+    String part = msg.substring(pos, min(pos + CHUNK, (int)msg.length()));
+    bleTx->setValue((uint8_t*)part.c_str(), part.length());
+    bleTx->notify();
+    delay(10);
+  }
+}
+
+static void bleReply(const String& id, int code, const String& body) {
+  bleNotifyRaw(id + " " + String(code) + " " + body + "\n");
+}
+
+static bool bleQueuePush(const String& line) {
+  uint8_t next = (uint8_t)((bleQHead + 1) % BLE_QUEUE_SIZE);
+  if (next == bleQTail) return false;
+  bleQueue[bleQHead] = line;
+  bleQHead = next;
+  return true;
+}
+
+static bool bleQueuePop(String& line) {
+  if (bleQTail == bleQHead) return false;
+  line = bleQueue[bleQTail];
+  bleQueue[bleQTail] = "";
+  bleQTail = (uint8_t)((bleQTail + 1) % BLE_QUEUE_SIZE);
+  return true;
+}
+
+class CrocoServerCallbacks : public BLEServerCallbacks {
+  void onConnect(BLEServer* pServer) override {
+    bleConnected = true;
+    bleApproved = false;
+    bleConnectedAt = millis();
+    bleApproveTracking = false;
+    bleButtonArmed = false;
+    bleRxAccum = "";
+    bleQHead = bleQTail = 0;
+  }
+  void onDisconnect(BLEServer* pServer) override {
+    bleConnected = false;
+    bleApproved = false;
+    bleApproveTracking = false;
+    bleButtonArmed = false;
+    bleRxAccum = "";
+    bleQHead = bleQTail = 0;
+    delay(30);
+    BLEDevice::startAdvertising();
+  }
+};
+
+class CrocoRxCallbacks : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic* c) override {
+    auto raw = c->getValue();
+    String v(raw.c_str());
+    if (v.length() == 0) return;
+    for (size_t i=0; i<v.length(); i++) {
+      char ch = v[i];
+      if (ch == '\r') continue;
+      if (ch == '\n') {
+        String line = bleRxAccum;
+        bleRxAccum = "";
+        line.trim();
+        if (line.length() > 0) bleQueuePush(line);
+      } else if (bleRxAccum.length() < BLE_MAX_LINE) {
+        bleRxAccum += ch;
+      } else {
+        bleRxAccum = "";
+      }
+    }
+  }
+};
+
+static bool initDfPlayerIfNeeded() {
+  if (!audioEnabled) return false;
+  if (dfplayerInitOk) return true;
+  mp3Serial.begin(9600, SERIAL_8N1, DFPLAYER_RX_PIN, DFPLAYER_TX_PIN);
+  delay(300);
+  for (int i=0; i<6 && !dfplayerInitOk; i++) {
+    dfplayerInitOk = player.begin(mp3Serial);
+    delay(250);
+  }
+  if (dfplayerInitOk) applyCurrentGameVolume();
+  return dfplayerInitOk;
+}
+
+static String buildHelloJson() {
+  return String("{\"product\":\"crocosauf\",\"protocol\":1,\"version\":\"") + SKETCH_VERSION +
+         "\",\"approved\":" + (bleApproved ? "true" : "false") + "}";
+}
+
+static String buildStatusJson() {
+  bool open = readDebouncedReedOpen();
+  bool pinchen = (digitalRead(MODUS_PIN) == LOW);
+  String j = "{";
+  j += "\"version\":\"" + String(SKETCH_VERSION) + "\",";
+  j += "\"state\":\"" + stateName() + "\",";
+  j += "\"pinchen\":" + String(pinchen ? "true" : "false") + ",";
+  j += "\"round\":" + String(rundeAktuell) + ",";
+  j += "\"open\":" + String(open ? "true" : "false") + ",";
+  j += "\"vol\":" + String(volumeLevel) + ",";
+  j += "\"muted\":" + String(isMuted ? "true" : "false") + ",";
+  j += "\"dfOk\":" + String(dfplayerInitOk ? "true" : "false") + ",";
+  j += "\"busy\":" + String(gameIsBusyForUi() ? "true" : "false") + ",";
+  j += "\"clients\":" + String(bleConnected ? 1 : 0) + ",";
+  j += "\"uiPlaying\":" + String(uiPlaying ? "true" : "false") + ",";
+  j += "\"uiMode\":" + String(uiMode) + ",";
+  j += "\"uiTrack\":" + String(uiCurrentTrack) + ",";
+  j += "\"testEffect\":" + String(uiEffectTesting ? uiEffectId : -1) + ",";
+  j += "\"testDisplay\":" + String(uiDispTesting ? uiDispId : -1) + ",";
+  j += "\"standby\":\"" + jsonEscape(standbyText) + "\",";
+  j += "\"error\":\"\"";
+  j += "}";
+  return j;
+}
+
+static String buildConfigJson() {
+  String j = "{";
+  j += "\"protocol\":1,";
+  j += "\"masks\":{";
+  j += "\"g\":" + String(gameTrackMask) + ",";
+  j += "\"go\":" + String(gameOverMask) + ",";
+  j += "\"w\":" + String(welcomeMask) + ",";
+  j += "\"r\":" + String(reminderMask) + ",";
+  j += "\"nr\":" + String(newRndMask) + ",";
+  j += "\"ge\":" + String(gameEffectMask) + ",";
+  j += "\"re\":" + String(reminderEffectMask) + ",";
+  j += "\"gd\":" + String(gameDispMask) + "},";
+  j += "\"random\":{";
+  j += "\"g\":" + String(gameTracksRandom ? "true" : "false") + ",";
+  j += "\"go\":" + String(gameOverRandom ? "true" : "false") + ",";
+  j += "\"w\":" + String(welcomeRandom ? "true" : "false") + ",";
+  j += "\"r\":" + String(reminderSoundRandom ? "true" : "false") + ",";
+  j += "\"nr\":" + String(newRndRandom ? "true" : "false") + ",";
+  j += "\"ge\":" + String(gameEffectsRandom ? "true" : "false") + ",";
+  j += "\"re\":" + String(reminderEffectsRandom ? "true" : "false") + ",";
+  j += "\"gd\":" + String(gameDispRandom ? "true" : "false") + "},";
+  j += "\"remEn\":" + String(reminderEnabled ? "true" : "false") + ",";
+  j += "\"remSnd\":" + String(reminderSoundEnabled ? "true" : "false") + ",";
+  j += "\"remMin\":" + String(reminderIntervalMs / 60000UL) + ",";
+  j += "\"remDur\":" + String(reminderEffectDurationMs) + ",";
+  j += "\"remLed\":" + String(reminderLedDurationMs) + ",";
+  j += "\"standby\":\"" + jsonEscape(standbyText) + "\",";
+  j += "\"gameFolder\":0,";
+  j += "\"rotation\":" + String(displayRotation) + ",";
+  j += "\"audioEnabled\":" + String(audioEnabled ? "true" : "false") + ",";
+  j += "\"ledBrightness\":" + String(ledBrightnessPct) + ",";
+  j += "\"displayBrightness\":" + String(displayBrightnessPct) + ",";
+  j += "\"startVolume\":" + String(volumeLevel) + ",";
+  j += "\"welcomeVolume\":" + String(welcomeVolumeLevel);
+  j += "}";
+  return j;
+}
+
+static void doVolUp() {
+  int v = volumeLevel;
+  if (isMuted) v = lastVolumeBeforeMute;
+  v += 5;
+  if (v > volumeMax) v = volumeMin;
+  volumeLevel = v;
+  lastVolumeBeforeMute = v;
+  isMuted = false;
+  applyCurrentGameVolume();
+  showVolumeOnMatrix();
+  prefs.putInt("vol", volumeLevel);
+  prefs.putBool("mut", isMuted);
+  lastUserActivityMs = millis();
+}
+
+static void doMuteToggle() {
+  isMuted = !isMuted;
+  if (isMuted) {
+    lastVolumeBeforeMute = max(volumeLevel, volumeMin);
+    volumeLevel = 0;
+    showMutedOnMatrix();
+  } else {
+    volumeLevel = max(lastVolumeBeforeMute, volumeMin);
+    showVolumeOnMatrix();
+  }
+  applyCurrentGameVolume();
+  prefs.putInt("vol", volumeLevel);
+  prefs.putBool("mut", isMuted);
+  lastUserActivityMs = millis();
+}
+
+static String appPlay(const String& query) {
+  if (!audioAvailable()) return "AUDIO_OFF";
+  if (welcomeActive) return "WELCOME_PLAYING";
+
+  String src = queryArg(query, "src");
+  int t = queryArg(query, "t", "0").toInt();
+  if (t <= 0) return "BAD_TRACK";
+
+  int newMode = 0;
+  if (src == "g" && t <= ROOT_GAME_TRACK_COUNT) newMode = 1;
+  else if (src == "w" && t <= WELCOME_TRACK_COUNT) newMode = 2;
+  else if (src == "go" && t <= GAMEOVER_TRACK_COUNT) newMode = 3;
+  else if (src == "r" && t <= REMINDER_TRACK_COUNT) newMode = 4;
+  else if (src == "nr" && t <= NEWRND_TRACK_COUNT) newMode = 5;
+  else return "BAD_SRC_OR_TRACK";
+
+  if (uiPlaying && uiMode == newMode && uiCurrentTrack == t) {
+    player.stop(); delay(120);
+    uiPlaying = false; uiMode = 0; uiCurrentTrack = 0;
+    return "STOP";
+  }
+  if (gameIsBusyForUi()) return "BUSY";
+
+  uiStopAll();
+  applyCurrentGameVolume();
+  delay(80);
+  if (newMode == 1) player.play(t);
+  else if (newMode == 2) player.playFolder(FOLDER_SYSTEM, t);
+  else if (newMode == 3) player.playFolder(FOLDER_GAMEOVER, t);
+  else if (newMode == 4) player.playFolder(FOLDER_REMINDER, t);
+  else if (newMode == 5) player.playFolder(FOLDER_NEWRND, t);
+  uiPlaying = true; uiMode = newMode; uiCurrentTrack = t;
+  return "PLAY";
+}
+
+static String appTestEffect(const String& query) {
+  if (gameIsBusyForUi()) return "BUSY";
+  int id = queryArg(query, "id", "-1").toInt();
+  if (id < 0 || id >= EFFECT_COUNT) return "BAD";
+  if (uiEffectTesting && uiEffectId == id) {
+    uiEffectTesting = false; uiEffectId = -1;
+    FastLED.clear(); FastLED.show();
+    return "STOP";
+  }
+  uiStopAll();
+  uiEffectTesting = true; uiEffectId = id;
+  resetEffects(); lastEffectUpdate = 0;
+  return "OK";
+}
+
+static String appTestDisplay(const String& query) {
+  if (gameIsBusyForUi()) return "BUSY";
+  int id = queryArg(query, "id", "-1").toInt();
+  if (id < 0 || id >= DISP_ANIM_COUNT) return "BAD";
+  if (uiDispTesting && uiDispId == id) {
+    uiDispTesting = false; uiDispId = -1; forcedGameShow = -1;
+    dispSetScroll(standbyText);
+    return "STOP";
+  }
+  uiStopAll();
+  uiDispTesting = true; uiDispId = id;
+  dispSetGameAnimForced(id);
+  return "OK";
+}
+
+static String appSaveGroup(const String& query) {
+  String group = queryArg(query, "group");
+  bool rnd = (queryArg(query, "mode", "seq") == "rnd");
+
+  if (group == "g") {
+    uint32_t m = maskFromQuery(query, ROOT_GAME_TRACK_COUNT); if (!m) m = DEFAULT_GAME_MASK;
+    gameTrackMask = (uint16_t)m; gameTracksRandom = rnd;
+    prefs.putUShort("gMask", gameTrackMask); prefs.putBool("gRnd", gameTracksRandom);
+  } else if (group == "go") {
+    uint32_t m = maskFromQuery(query, GAMEOVER_TRACK_COUNT); if (!m) m = DEFAULT_GAMEOVER_MASK;
+    gameOverMask = (uint16_t)m; gameOverRandom = rnd;
+    prefs.putUShort("goMask", gameOverMask); prefs.putBool("goRnd", gameOverRandom);
+  } else if (group == "w") {
+    uint32_t m = maskFromQuery(query, WELCOME_TRACK_COUNT); if (!m) m = DEFAULT_WELCOME_MASK;
+    welcomeMask = (uint8_t)m; welcomeRandom = rnd;
+    prefs.putUChar("wMask", welcomeMask); prefs.putBool("wRnd", welcomeRandom);
+  } else if (group == "r") {
+    uint32_t m = maskFromQuery(query, REMINDER_TRACK_COUNT); if (!m) m = DEFAULT_REMINDER_MASK;
+    reminderMask = (uint8_t)m; reminderSoundRandom = rnd;
+    prefs.putUChar("rMask", reminderMask); prefs.putBool("rRnd", reminderSoundRandom);
+  } else if (group == "nr") {
+    uint32_t m = maskFromQuery(query, NEWRND_TRACK_COUNT); if (!m) m = DEFAULT_NEWRND_MASK;
+    newRndMask = (uint8_t)m; newRndRandom = rnd;
+    prefs.putUChar("nrMask", newRndMask); prefs.putBool("nrRnd", newRndRandom);
+  } else if (group == "ge") {
+    uint32_t m = maskFromQuery(query, EFFECT_COUNT); if (!m) m = 0x000FFFFF;
+    gameEffectMask = m; gameEffectsRandom = rnd;
+    prefs.putULong("geMask", gameEffectMask); prefs.putBool("geRnd", gameEffectsRandom);
+  } else if (group == "re") {
+    uint32_t m = maskFromQuery(query, EFFECT_COUNT);
+    if (!m) m = (1UL<<1)|(1UL<<4)|(1UL<<10)|(1UL<<11)|(1UL<<15)|(1UL<<18);
+    reminderEffectMask = m; reminderEffectsRandom = rnd;
+    prefs.putULong("reMask", reminderEffectMask); prefs.putBool("reRnd", reminderEffectsRandom);
+  } else if (group == "gd") {
+    uint32_t m = maskFromQuery(query, DISP_ANIM_COUNT); if (!m) m = 0x000FFFFF;
+    gameDispMask = m; gameDispRandom = rnd;
+    prefs.putULong("gdMask", gameDispMask); prefs.putBool("gdRnd", gameDispRandom);
+  } else return "BAD_GROUP";
+
+  lastUserActivityMs = millis();
+  return "OK";
+}
+
+static void applyDisplayConfig(const String& query) {
+  if (queryHas(query, "rot")) {
+    displayRotation = (uint8_t)constrain(queryArg(query, "rot", "0").toInt(), 0, 3);
+    prefs.putUChar("dRot", displayRotation);
+  }
+  if (queryHas(query, "lbr")) {
+    ledBrightnessPct = (uint8_t)constrain(queryArg(query, "lbr", "100").toInt(), 0, 100);
+    prefs.putUChar("lBr", ledBrightnessPct); applyLedBrightness();
+  }
+  if (queryHas(query, "dbr")) {
+    displayBrightnessPct = (uint8_t)constrain(queryArg(query, "dbr", "100").toInt(), 0, 100);
+    prefs.putUChar("dBr", displayBrightnessPct); applyDisplayBrightness();
+  }
+  matrix.setRotation(displayRotation & 3);
+  dispHardClear();
+  if (digitalRead(MODUS_PIN) == LOW) dispSetPinchBlink(); else dispSetScroll(standbyText);
+  lastUserActivityMs = millis();
+}
+
+static void applyAudioConfig(const String& query) {
+  bool requestedAudio = queryHas(query, "aen") ? argTruthy(query, "aen") : audioEnabled;
+  audioEnabled = requestedAudio;
+  prefs.putBool("aEn", audioEnabled);
+
+  if (!audioEnabled) {
+    welcomeActive = false;
+    pendingResumeMusicAfterWelcome = false;
+    pendingStartAfterWelcome = false;
+    if (dfplayerInitOk) { player.stop(); delay(120); }
+  } else {
+    initDfPlayerIfNeeded();
+  }
+
+  if (queryHas(query, "vstart")) {
+    int vStart = constrain(queryArg(query, "vstart", "20").toInt(), 0, 30);
+    if (vStart == 0) {
+      if (!isMuted) lastVolumeBeforeMute = max(volumeLevel, volumeMin);
+      isMuted = true; volumeLevel = 0;
+    } else {
+      isMuted = false;
+      volumeLevel = constrain(vStart, volumeMin, volumeMax);
+      lastVolumeBeforeMute = volumeLevel;
+    }
+  }
+  if (queryHas(query, "vwelcome")) {
+    welcomeVolumeLevel = constrain(queryArg(query, "vwelcome", "20").toInt(), 0, 30);
+  }
+
+  prefs.putInt("vol", volumeLevel);
+  prefs.putBool("mut", isMuted);
+  prefs.putInt("wVol", welcomeVolumeLevel);
+  applyCurrentGameVolume();
+  showVolumeOnMatrix();
+  lastUserActivityMs = millis();
+}
+
+static void applyReminderConfig(const String& query) {
+  reminderEnabled = argTruthy(query, "ren");
+  reminderSoundEnabled = argTruthy(query, "rsnd");
+  uint16_t remMin = constrain((uint16_t)queryArg(query, "rmin", "8").toInt(), (uint16_t)1, (uint16_t)60);
+  reminderIntervalMs = (uint32_t)remMin * 60UL * 1000UL;
+  uint16_t rd = constrain((uint16_t)queryArg(query, "rdur", "3500").toInt(), (uint16_t)1500, (uint16_t)9000);
+  reminderEffectDurationMs = rd;
+  if (queryHas(query, "rled")) {
+    uint32_t rled = (uint32_t)queryArg(query, "rled", String(reminderEffectDurationMs)).toInt();
+    reminderLedDurationMs = constrain(rled, 1500UL, 30000UL);
+    prefs.putUInt("remLed", reminderLedDurationMs);
+  }
+  prefs.putBool("remEn", reminderEnabled);
+  prefs.putBool("remSnd", reminderSoundEnabled);
+  prefs.putUShort("remMin", remMin);
+  prefs.putUShort("remDur", reminderEffectDurationMs);
+  lastUserActivityMs = millis();
+  lastReminderCheckMs = millis();
+}
+
+static void factoryResetSettings() {
+  prefs.clear();
+
+  gameTrackMask = DEFAULT_GAME_MASK;
+  gameOverMask = DEFAULT_GAMEOVER_MASK;
+  welcomeMask = DEFAULT_WELCOME_MASK;
+  reminderMask = DEFAULT_REMINDER_MASK;
+  newRndMask = DEFAULT_NEWRND_MASK;
+  gameTracksRandom = true;
+  gameOverRandom = false;
+  welcomeRandom = false;
+  reminderSoundRandom = true;
+  newRndRandom = false;
+
+  gameEffectMask = 0x000FFFFF;
+  reminderEffectMask = (1UL<<1)|(1UL<<4)|(1UL<<10)|(1UL<<11)|(1UL<<15)|(1UL<<18);
+  gameEffectsRandom = false;
+  reminderEffectsRandom = true;
+  gameDispMask = 0x000FFFFF;
+  gameDispRandom = false;
+
+  reminderEnabled = true;
+  reminderSoundEnabled = true;
+  reminderIntervalMs = 8UL * 60UL * 1000UL;
+  reminderEffectDurationMs = 3500;
+  reminderLedDurationMs = 3500;
+  standbyText = "CROCOSAUF DELUXE";
+  volumeLevel = 20;
+  welcomeVolumeLevel = 20;
+  lastVolumeBeforeMute = 20;
+  isMuted = false;
+  displayRotation = 0;
+  audioEnabled = true;
+  ledBrightnessPct = 100;
+  displayBrightnessPct = 100;
+
+  prefs.putUShort("gMask", gameTrackMask);
+  prefs.putUShort("goMask", gameOverMask);
+  prefs.putUChar("wMask", welcomeMask);
+  prefs.putUChar("rMask", reminderMask);
+  prefs.putUChar("nrMask", newRndMask);
+  prefs.putUInt("remLed", reminderLedDurationMs);
+  prefs.putBool("gRnd", gameTracksRandom);
+  prefs.putBool("goRnd", gameOverRandom);
+  prefs.putBool("wRnd", welcomeRandom);
+  prefs.putBool("rRnd", reminderSoundRandom);
+  prefs.putBool("nrRnd", newRndRandom);
+  prefs.putULong("geMask", gameEffectMask);
+  prefs.putULong("reMask", reminderEffectMask);
+  prefs.putBool("geRnd", gameEffectsRandom);
+  prefs.putBool("reRnd", reminderEffectsRandom);
+  prefs.putULong("gdMask", gameDispMask);
+  prefs.putBool("gdRnd", gameDispRandom);
+  prefs.putBool("remEn", reminderEnabled);
+  prefs.putBool("remSnd", reminderSoundEnabled);
+  prefs.putUShort("remMin", 8);
+  prefs.putUShort("remDur", reminderEffectDurationMs);
+  prefs.putString("sTxt", standbyText);
+  prefs.putInt("vol", volumeLevel);
+  prefs.putBool("mut", isMuted);
+  prefs.putInt("wVol", welcomeVolumeLevel);
+  prefs.putUChar("dRot", displayRotation);
+  prefs.putBool("aEn", audioEnabled);
+  prefs.putUChar("lBr", ledBrightnessPct);
+  prefs.putUChar("dBr", displayBrightnessPct);
+
+  initDfPlayerIfNeeded();
+  matrix.setRotation(displayRotation & 3);
+  applyDisplayBrightness();
+  applyLedBrightness();
+  applyCurrentGameVolume();
+  pinchRoundsDone = 0;
+  rundeAktuell = 1;
+  uiStopAll();
+  dispSetScroll(standbyText);
+  lastUserActivityMs = millis();
+  lastReminderCheckMs = millis();
+}
+
+static void processBleCommand(const String& line) {
+  int sp = line.indexOf(' ');
+  String id = (sp > 0) ? line.substring(0, sp) : "0";
+  String req = (sp > 0) ? line.substring(sp + 1) : line;
+  req.trim();
+
+  int qm = req.indexOf('?');
+  String path = (qm >= 0) ? req.substring(0, qm) : req;
+  String query = (qm >= 0) ? req.substring(qm + 1) : "";
+
+  if (path == "/hello") {
+    bleReply(id, 200, buildHelloJson());
+    return;
+  }
+  if (!bleApproved) {
+    bleReply(id, 403, "NOT_APPROVED");
+    return;
+  }
+
+  if (path == "/status") bleReply(id, 200, buildStatusJson());
+  else if (path == "/config") bleReply(id, 200, buildConfigJson());
+  else if (path == "/stop") {
+    if (welcomeActive || spielLaeuft || isGameOver || neueRundePhase) bleReply(id, 409, "BUSY");
+    else {
+      if (reminderRunning) reminderStop();
+      uiStopAll();
+      if (digitalRead(MODUS_PIN) == LOW) dispSetPinchBlink(); else dispSetScroll(standbyText);
+      lastUserActivityMs = millis();
+      bleReply(id, 200, "OK");
+    }
+  }
+  else if (path == "/volUp") { doVolUp(); bleReply(id, 200, "OK"); }
+  else if (path == "/muteToggle") { doMuteToggle(); bleReply(id, 200, "OK"); }
+  else if (path == "/volume") {
+    int v = constrain(queryArg(query, "v", "20").toInt(), volumeMin, volumeMax);
+    volumeLevel = v; lastVolumeBeforeMute = v; isMuted = false;
+    applyCurrentGameVolume(); showVolumeOnMatrix();
+    prefs.putInt("vol", volumeLevel); prefs.putBool("mut", false);
+    lastUserActivityMs = millis();
+    bleReply(id, 200, "OK");
+  }
+  else if (path == "/play") bleReply(id, 200, appPlay(query));
+  else if (path == "/testEffect") bleReply(id, 200, appTestEffect(query));
+  else if (path == "/testDisp") bleReply(id, 200, appTestDisplay(query));
+  else if (path == "/save") {
+    String r = appSaveGroup(query);
+    bleReply(id, r == "OK" ? 200 : 400, r);
+  }
+  else if (path == "/saveText") {
+    String t = queryArg(query, "txt");
+    t.trim();
+    if (t.length() == 0) t = "CROCOSAUF DELUXE";
+    if (t.length() > 40) t = t.substring(0, 40);
+    standbyText = t;
+    prefs.putString("sTxt", standbyText);
+    if (!spielLaeuft && !isGameOver && !neueRundePhase && !reminderRunning && (digitalRead(MODUS_PIN) != LOW)) dispSetScroll(standbyText);
+    bleReply(id, 200, "OK");
+  }
+  else if (path == "/saveReminderCfg") { applyReminderConfig(query); bleReply(id, 200, "OK"); }
+  else if (path == "/saveDisplayCfg") { applyDisplayConfig(query); bleReply(id, 200, "OK"); }
+  else if (path == "/saveAudioCfg") { applyAudioConfig(query); bleReply(id, 200, "OK"); }
+  else if (path == "/showScroll") {
+    if (!spielLaeuft && !isGameOver && !neueRundePhase && !reminderRunning) dispSetScroll(standbyText);
+    bleReply(id, 200, "OK");
+  }
+  else if (path == "/testReminder") {
+    if (gameIsBusyForUi()) bleReply(id, 409, "BUSY");
+    else { reminderStart(); bleReply(id, 200, "OK"); }
+  }
+  else if (path == "/factoryReset") {
+    if (queryArg(query, "confirm") != "yes") bleReply(id, 400, "CONFIRM_REQUIRED");
+    else { factoryResetSettings(); bleReply(id, 200, "OK"); }
+  }
+  else bleReply(id, 404, "NOT_FOUND");
+}
+
+static void startBleControl() {
+  if (bleStarted) return;
+  BLEDevice::init(BLE_DEVICE_NAME);
+  bleServer = BLEDevice::createServer();
+  bleServer->setCallbacks(new CrocoServerCallbacks());
+
+  BLEService* svc = bleServer->createService(BLE_SERVICE_UUID);
+  bleRx = svc->createCharacteristic(BLE_RX_UUID, BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
+  bleTx = svc->createCharacteristic(BLE_TX_UUID, BLECharacteristic::PROPERTY_NOTIFY);
+  bleTx->addDescriptor(new BLE2902());
+  bleRx->setCallbacks(new CrocoRxCallbacks());
+  svc->start();
+
+  BLEAdvertising* adv = BLEDevice::getAdvertising();
+  adv->addServiceUUID(BLE_SERVICE_UUID);
+  adv->setScanResponse(true);
+  adv->setMinPreferred(0x06);
+  adv->setMaxPreferred(0x12);
+  BLEDevice::startAdvertising();
+  bleStarted = true;
+}
+
+static void handleBleApproval(bool maulOffen) {
+  if (!bleConnected) {
+    bleApproveTracking = false;
+    bleButtonArmed = false;
+    return;
+  }
+
+  bool pressed = (readDebouncedButton() == LOW);
+  if (!pressed) {
+    bleButtonArmed = true;
+    bleApproveTracking = false;
+  }
+
+  if (bleApproved) return;
+
+  bool readyForApproval = !maulOffen && gameReady && !spielLaeuft && !isGameOver && !neueRundePhase && !reminderRunning && !welcomeActive;
+  if (readyForApproval && pressed && bleButtonArmed) {
+    if (!bleApproveTracking) {
+      bleApproveTracking = true;
+      bleApprovePressStart = millis();
+    } else if (millis() - bleApprovePressStart >= BLE_APPROVE_HOLD_MS) {
+      bleApproved = true;
+      bleApproveTracking = false;
+      dispSetScroll("APP OK", 1800);
+      lastUserActivityMs = millis();
+      // Keine unaufgeforderte BLE-Antwort senden: die App pollt /hello mit eigener Request-ID.
+    }
+  } else if (!readyForApproval) {
+    bleApproveTracking = false;
+  }
+}
+
+static void bleLoop() {
+  String line;
+  if (bleQueuePop(line)) processBleCommand(line);
+
+  if (bleConnected && !bleApproved && (millis() - bleConnectedAt > BLE_UNAPPROVED_TIMEOUT_MS)) {
+    if (bleServer) bleServer->disconnect(bleServer->getConnId());
+  }
+}
+
+// ============================================================
+// Random seed helper
+// ============================================================
+static inline void seedBetterRandom() {
+  uint32_t seed = (uint32_t)micros();
+  seed ^= (uint32_t)esp_random();
+  randomSeed(seed);
+}
+
+// ============================================================
+// setup / loop
+// ============================================================
+void setup() {
+  setCpuFrequencyMhz(80);
+  Serial.begin(115200);
+  delay(150);
+
+  bootCount++;
+  esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+  lastWakeWasTimer = (cause == ESP_SLEEP_WAKEUP_TIMER) ? 1 : 0;
+
+  prefs.begin("crocodoc", false);
+
+  // Load settings
+  gameTrackMask = prefs.getUShort("gMask", DEFAULT_GAME_MASK); if (gameTrackMask == 0) gameTrackMask = DEFAULT_GAME_MASK;
+  gameOverMask  = prefs.getUShort("goMask", DEFAULT_GAMEOVER_MASK); if (gameOverMask == 0) gameOverMask = DEFAULT_GAMEOVER_MASK;
+  welcomeMask   = prefs.getUChar("wMask", DEFAULT_WELCOME_MASK); if (welcomeMask == 0) welcomeMask = DEFAULT_WELCOME_MASK;
+  reminderMask  = prefs.getUChar("rMask", DEFAULT_REMINDER_MASK); if (reminderMask == 0) reminderMask = DEFAULT_REMINDER_MASK;
+  newRndMask    = prefs.getUChar("nrMask", DEFAULT_NEWRND_MASK); if (newRndMask == 0) newRndMask = DEFAULT_NEWRND_MASK;
+
+  gameTracksRandom    = prefs.getBool("gRnd", true);
+  gameOverRandom      = prefs.getBool("goRnd", false);
+  welcomeRandom       = prefs.getBool("wRnd", false);
+  reminderSoundRandom = prefs.getBool("rRnd", true);
+  newRndRandom        = prefs.getBool("nrRnd", false);
+
+  gameEffectMask = prefs.getULong("geMask", 0x000FFFFF);
+  if ((gameEffectMask & 0x000FFFFF) == 0) gameEffectMask = 0x000FFFFF;
+
+  reminderEffectMask = prefs.getULong("reMask", (1UL<<1)|(1UL<<4)|(1UL<<10)|(1UL<<11)|(1UL<<15)|(1UL<<18));
+  if ((reminderEffectMask & 0x000FFFFF) == 0) reminderEffectMask = (1UL<<1)|(1UL<<4)|(1UL<<10)|(1UL<<11)|(1UL<<15)|(1UL<<18);
+
+  gameEffectsRandom = prefs.getBool("geRnd", false);
+  reminderEffectsRandom = prefs.getBool("reRnd", true);
+
+  gameDispMask = prefs.getULong("gdMask", 0x000FFFFF);
+  if ((gameDispMask & 0x000FFFFF) == 0) gameDispMask = 0x000FFFFF;
+  gameDispRandom = prefs.getBool("gdRnd", false);
+
+  standbyText = prefs.getString("sTxt", "CROCOSAUF DELUXE");
+  standbyText.trim();
+  if (standbyText.length() == 0) standbyText = "CROCOSAUF DELUXE";
+  if (standbyText.length() > 40) standbyText = standbyText.substring(0, 40);
+
+  volumeLevel = prefs.getInt("vol", 20);
+  volumeLevel = constrain(volumeLevel, volumeMin, volumeMax);
+  isMuted = prefs.getBool("mut", false);
+  if (isMuted) volumeLevel = 0;
+
+  welcomeVolumeLevel = prefs.getInt("wVol", 20);
+  welcomeVolumeLevel = constrain(welcomeVolumeLevel, 0, 30);
+
+  reminderEnabled      = prefs.getBool("remEn", true);
+  reminderSoundEnabled = prefs.getBool("remSnd", true);
+
+  uint16_t remMin = prefs.getUShort("remMin", 8);
+  remMin = constrain(remMin, (uint16_t)1, (uint16_t)60);
+  reminderIntervalMs = (uint32_t)remMin * 60UL * 1000UL;
+
+  uint16_t rd = prefs.getUShort("remDur", 3500);
+  rd = constrain(rd, (uint16_t)1500, (uint16_t)9000);
+  reminderEffectDurationMs = rd;
+
+  reminderLedDurationMs = prefs.getUInt("remLed", reminderEffectDurationMs);
+  reminderLedDurationMs = constrain(reminderLedDurationMs, 1500UL, 30000UL);
+
+  // NEW load
+  displayRotation = prefs.getUChar("dRot", 0) & 3;
+  audioEnabled = prefs.getBool("aEn", true);
+
+  // NEW load brightness
+  ledBrightnessPct = prefs.getUChar("lBr", 100);
+  ledBrightnessPct = constrain(ledBrightnessPct, (uint8_t)0, (uint8_t)100);
+
+  displayBrightnessPct = prefs.getUChar("dBr", 100);
+  displayBrightnessPct = constrain(displayBrightnessPct, (uint8_t)0, (uint8_t)100);
+
+  // Pins
+  pinMode(MAUL_SENSOR_PIN, INPUT_PULLUP);
+  pinMode(VOLUME_TASTER,   INPUT_PULLUP);
+  pinMode(MODUS_PIN,       INPUT_PULLUP);
+  pinMode(DFPLAYER_BUSY_PIN, INPUT_PULLUP);
+
+  // I2C + Matrix
+  Wire.begin(I2C_SDA, I2C_SCL);
+  matrix.begin(0x70);
+  matrix.setRotation(displayRotation & 3);
+  applyDisplayBrightness();
+  dispHardClear();
+
+  // LED Strip
+  FastLED.addLeds<WS2812B, LED_PIN, GRB>(leds, NUM_LEDS);
+  applyLedBrightness();
+  FastLED.clear(); FastLED.show();
+
+  // Debounce init
+  maulOffenLastRaw = (digitalRead(MAUL_SENSOR_PIN) == HIGH);
+  maulOffenStable  = maulOffenLastRaw;
+  maulLastChange   = millis();
+  maulOpenSince    = maulOffenStable ? millis() : 0;
+
+  // DFPlayer init (FAILSAFE + Audio toggle)
+  dfplayerInitOk = false;
+  if (audioEnabled) {
+    mp3Serial.begin(9600, SERIAL_8N1, DFPLAYER_RX_PIN, DFPLAYER_TX_PIN);
+    delay(800);
+    for (int i = 0; i < 6 && !dfplayerInitOk; i++) { dfplayerInitOk = player.begin(mp3Serial); delay(300); }
+    if (dfplayerInitOk) applyCurrentGameVolume();
+  }
+
+  seedBetterRandom();
+
+  lastUserActivityMs = millis();
+  lastReminderCheckMs = millis();
+
+  bool coldBootLikely = (cause == ESP_SLEEP_WAKEUP_UNDEFINED);
+  if (!lastWakeWasTimer) startBleControl();
+
+  if (digitalRead(MODUS_PIN) == LOW) dispSetPinchBlink();
+  else dispSetScroll(standbyText);
+
+  lastPinchenModus = (digitalRead(MODUS_PIN) == LOW);
+
+  // Welcome: kommt immer bei Coldboot, auch wenn vorher Mute gespeichert war
+  if (audioAvailable() && coldBootLikely) {
+    delay(1200);
+    static int lastW = 1;
+    int w = pickFromMask_1based(WELCOME_TRACK_COUNT, welcomeMask, welcomeRandom, lastW);
+
+    player.stop(); delay(120);
+    applyVolumeToPlayer(welcomeVolumeLevel); delay(120);
+    player.playFolder(FOLDER_SYSTEM, w);
+
+    welcomeActive = true;
+    welcomeStartedMs = millis();
+    welcomeSawBusyLow = false;
+  }
+
+  // Wake by timer: Reminder (kurz) dann wieder schlafen
+  if (lastWakeWasTimer) {
+    bool maulOffen = readDebouncedReedOpen();
+    if (!maulOffen) {
+      reminderStart();
+
+      while (millis() < reminderUntilMs) {
+        dispRender();
+        effect_render(reminderEffectId);
+        if (readDebouncedReedOpen()) break;
+        delay(1);
+      }
+
+      reminderStop();
+      enterDeepSleepNow();
+    } else {
+      // Falls der Benutzer genau beim Timer-Wakeup das Maul geoeffnet hat,
+      // bleibt das Geraet wach und Bluetooth wird fuer die App gestartet.
+      startBleControl();
+      lastUserActivityMs = millis();
+    }
+  }
+}
+
+void loop() {
+  bleLoop();
+
+  bool maulOffen = readDebouncedReedOpen();
+
+  static bool lastStableOpen = false;
+  if (maulOffen && !lastStableOpen) {
+    maulOpenSince = millis();
+    lastUserActivityMs = millis();
+  }
+  if (!maulOffen && lastStableOpen) {
+    lastUserActivityMs = millis();
+  }
+  lastStableOpen = maulOffen;
+
+  handleBleApproval(maulOffen);
+  handleVolumeAndMute(maulOffen);
+  dispRender();
+
+  updateWelcomeState();
+
+  if (!welcomeActive) {
+    if (pendingResumeMusicAfterWelcome && spielLaeuft && maulOffen) {
+      pendingResumeMusicAfterWelcome = false;
+      startLoopGameMusicNow();
+    }
+    if (pendingStartAfterWelcome) {
+      if (gameReady && maulOffen && !spielLaeuft && !isGameOver && !neueRundePhase && !reminderRunning) {
+        pendingStartAfterWelcome = false;
+        startGameNow(pendingStartPinchenMode);
+      }
+    }
+  }
+
+  // Modusschalter entprellt
+  static bool modusLastRaw = false;
+  static bool modusStable  = false;
+  static unsigned long modusLastChange = 0;
+
+  bool modusRaw = (digitalRead(MODUS_PIN) == LOW);
+  unsigned long now = millis();
+
+  if (modusRaw != modusLastRaw) { modusLastRaw = modusRaw; modusLastChange = now; lastUserActivityMs = millis(); }
+  if (now - modusLastChange >= MODUS_DEBOUNCE_MS) modusStable = modusRaw;
+
+  bool pinchenModus = modusStable;
+
+  // App-Tests: beim Oeffnen des Mauls sofort beenden, damit das Spiel normal starten kann.
+  if (!gameIsBusyForUi()) {
+    if (maulOffen && (uiPlaying || uiEffectTesting || uiDispTesting)) {
+      uiStopAll();
+      if (pinchenModus) dispSetPinchBlink(); else dispSetScroll(standbyText);
+    } else {
+      if (uiEffectTesting) { effect_render(uiEffectId); delay(1); return; }
+      if (uiDispTesting)   { delay(1); return; }
+    }
+  } else {
+    if (uiEffectTesting || uiDispTesting) {
+      uiEffectTesting = false; uiEffectId = -1;
+      uiDispTesting = false; uiDispId = -1;
+      forcedGameShow = -1;
+    }
+  }
+
+  // MODE SWITCH sofort
+  if (pinchenModus != lastPinchenModus) {
+    if (pinchenModus) switchToPinchenMode(maulOffen);
+    else switchToNormalMode(maulOffen);
+    lastPinchenModus = pinchenModus;
+  }
+
+  // Reminder running
+  if (reminderRunning) {
+    if (maulOffen) { reminderStop(); lastUserActivityMs = millis(); }
+    else {
+      if (millis() - reminderSwapLast >= REMINDER_SWAP_MS) {
+        reminderSwapLast = millis();
+        reminderShowCup = !reminderShowCup;
+        if (reminderShowCup) dispSetCupAnim(255, 0);
+        else dispSetReminderAnim();
+      }
+      effect_render(reminderEffectId);
+      if (millis() > reminderUntilMs) { reminderStop(); }
+      delay(1);
+      return;
+    }
+  }
+
+  // NEUE RUNDE PHASE
+  if (neueRundePhase) {
+    openCandidate = false;
+    if (millis() - neueRundeStart < GRUEN_PHASE_DURATION) {
+      if (millis() - lastGameOverBlink > PINCHEN_BLINK_INTERVAL) {
+        blinkToggle = !blinkToggle;
+        lastGameOverBlink = millis();
+      }
+      fill_solid(leds, NUM_LEDS, blinkToggle ? CRGB::Green : CRGB::Black);
+      FastLED.show();
+
+      if (dispMode != DISP_SCROLL || dispText != "NEUE RUNDE") {
+        dispSetScroll("NEUE RUNDE", GRUEN_PHASE_DURATION + 1000);
+      }
+    } else {
+      neueRundePhase = false;
+      gameReady = true;
+      FastLED.clear(); FastLED.show();
+
+      pinchRoundsDone = 0;
+      rundeAktuell = 1;
+      for (int i = 0; i < PINCHEN_TOTAL; i++) pinnchenVerwendet[i] = false;
+
+      dispSetPinchBlink();
+      tryAutoStartIfAlreadyOpen(true, maulOffen);
+    }
+    delay(1);
+    return;
+  }
+
+  // GAMEOVER PHASE
+  if (isGameOver) {
+    openCandidate = false;
+
+    if (pinchenModus) {
+      if (dispMode != DISP_CUP_ANIM) dispSetCupAnim(255, 0);
+    } else {
+      if (dispMode != DISP_CUP_ANIM) dispSetCupAnim(255, NORMAL_GAMEOVER_CUP_MS);
+    }
+
+    blinkGameOver(pinchenModus);
+
+    unsigned long elapsed = millis() - gameOverStart;
+    unsigned long waitTime = RED_PHASE_DURATION + (pinchenModus ? PINCHEN_PHASE_DURATION : 0);
+
+    if (elapsed > waitTime) {
+      isGameOver = false;
+      pinnchenGezeigt = false;
+      FastLED.clear(); FastLED.show();
+
+      if (pinchenModus) {
+        pinchenAdvanceAfterGameOver(maulOffen);
+      } else {
+        gameReady = true;
+        lastUserActivityMs = millis();
+        tryAutoStartIfAlreadyOpen(false, maulOffen);
+      }
+    }
+
+    delay(1);
+    return;
+  }
+
+  // Start-Arming
+  if (maulOffen && gameReady && !spielLaeuft) {
+    if (!openCandidate) { openCandidate = true; openSince = maulOpenSince; }
+    else {
+      if (millis() - openSince >= OPEN_CONFIRM_MS) {
+        openCandidate = false;
+        startGameNow(pinchenModus);
+      }
+    }
+  }
+  if (!maulOffen && openCandidate && !spielLaeuft) openCandidate = false;
+
+  // Spiel läuft
+  if (spielLaeuft && maulOffen) {
+    static unsigned long musicKeepaliveLast = 0;
+    if (millis() - musicKeepaliveLast > 2000) {
+      musicKeepaliveLast = millis();
+      ensureGameMusicIfNeeded(maulOffen);
+    }
+
+    if (millis() - lastEffectSwitch > effectInterval) {
+      static int lastGE2 = 0;
+      currentEffect = pickEffectFromMask_0based(EFFECT_COUNT, gameEffectMask, gameEffectsRandom, lastGE2);
+      resetEffects();
+      lastEffectSwitch = millis();
+    }
+    effect_render(currentEffect);
+  }
+
+  // Maul zu -> GameOver
+  if (!maulOffen && spielLaeuft && !isGameOver) {
+    openCandidate = false;
+    lastUserActivityMs = millis();
+
+    currentGameMusicTrack = 0;
+    dfIdleSinceMs = 0;
+
+    if (audioAvailable() && !welcomeActive && !isMuted) {
+      static int lastGO = 1;
+      int go = pickFromMask_1based(GAMEOVER_TRACK_COUNT, gameOverMask, gameOverRandom, lastGO);
+
+      player.stop(); delay(120);
+      applyCurrentGameVolume(); delay(120);
+      player.playFolder(FOLDER_GAMEOVER, go);
+    }
+
+    if (pinchenModus) dispSetCupAnim(255, 0);
+    else dispSetCupAnim(255, NORMAL_GAMEOVER_CUP_MS);
+
+    isGameOver = true;
+    spielLaeuft = false;
+    pinnchenGezeigt = false;
+    gameReady = false;
+    gameOverStart = millis();
+
+    FastLED.clear();
+    FastLED.show();
+  }
+
+  // Idle -> Reminder + Sleep
+  bool idleState = (!spielLaeuft && !isGameOver && !neueRundePhase && gameReady);
+
+  if (idleState) {
+    if (reminderEnabled && !maulOffen) {
+      if (millis() - lastReminderCheckMs >= reminderIntervalMs) {
+        reminderStart();
+        lastReminderCheckMs = millis();
+      }
+    } else {
+      lastReminderCheckMs = millis();
+    }
+
+    if (!maulOffen && !bleConnected && (millis() - lastUserActivityMs >= DEEP_SLEEP_AFTER_MS)) {
+      enterDeepSleepNow();
+    }
+
+    delay(10);
+  } else {
+    delay(1);
+  }
+}

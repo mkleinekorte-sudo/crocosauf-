@@ -66,12 +66,14 @@ struct Preferences{
  uint64_t get(const char* k,uint64_t v){return n.count(k)?n[k]:v;}
  uint16_t getUShort(const char*k,uint16_t v){return get(k,v);}
  uint8_t getUChar(const char*k,uint8_t v){return get(k,v);}
+ uint32_t getUInt(const char*k,uint32_t v){return get(k,v);}
  uint32_t getULong(const char*k,uint32_t v){return get(k,v);}
  int getInt(const char*k,int v){return get(k,v);}
  bool getBool(const char*k,bool v){return get(k,v);}
  String getString(const char*k,const char*v){return s.count(k)?s[k]:String(v);}
  void putUShort(const char*k,uint16_t v){n[k]=v;}
  void putUChar(const char*k,uint8_t v){n[k]=v;}
+ void putUInt(const char*k,uint32_t v){n[k]=v;}
  void putULong(const char*k,uint32_t v){n[k]=v;}
  void putInt(const char*k,int v){n[k]=v;}
  void putBool(const char*k,bool v){n[k]=v;}
@@ -120,9 +122,9 @@ inline const CRGB CRGB::Blue{0,0,255},CRGB::White{255,255,255},CRGB::Yellow{255,
 struct WS2812B{};
 #define GRB 0
 struct FastLEDClass{
- CRGB* data=nullptr;int count=0;
+ CRGB* data=nullptr;int count=0;int globalBrightness=255;
  template<class T,int P,int O>void addLeds(CRGB* p,int n){data=p;count=n;}
- void setBrightness(int){}
+ void setBrightness(int v){globalBrightness=v;}
  void clear(){if(data)std::fill(data,data+count,CRGB::Black);}
  void show(){}
 };
@@ -133,10 +135,12 @@ inline void fadeToBlackBy(CRGB* p,int n,int){for(int i=0;i<n;i++)p[i]=CRGB(p[i].
 #define LED_OFF 0
 struct Adafruit_8x8matrix{
  std::array<int,64> pixels{};String lastText;
- void begin(int){}
- void setRotation(int){}
+ int rotation=0,brightness=15,writes=0,begins=0;
+ bool begin(int){begins++;return true;}
+ void setRotation(int r){rotation=r;}
+ void setBrightness(int b){brightness=b;}
  void clear(){pixels.fill(0);}
- void writeDisplay(){}
+ void writeDisplay(){writes++;}
  void drawPixel(int x,int y,int v){if(x>=0&&y>=0&&x<8&&y<8)pixels[y*8+x]=v;}
  void drawLine(int a,int b,int c,int d,int v){if(a==c){for(int y=min(b,d);y<=max(b,d);y++)drawPixel(a,y,v);}else for(int x=min(a,c);x<=max(a,c);x++)drawPixel(x,b,v);}
  void drawRect(int x,int y,int w,int h,int v){drawLine(x,y,x+w-1,y,v);drawLine(x,y+h-1,x+w-1,y+h-1,v);drawLine(x,y,x,y+h-1,v);drawLine(x+w-1,y,x+w-1,y+h-1,v);}
@@ -146,7 +150,13 @@ struct Adafruit_8x8matrix{
  void setCursor(int,int){}
  void print(String v){lastText=v;}
 };
-struct WireClass{void begin(int,int){}};
+struct WireClass{
+ bool present=true;int timeout=50,probes=0;
+ void begin(int,int){}
+ void setTimeOut(int ms){timeout=ms;}
+ void beginTransmission(int){}
+ int endTransmission(){probes++;if(!present)delay(timeout);return present?0:4;}
+};
 inline WireClass Wire;
 inline bool mockAudioEnabled=true;
 inline uint32_t mockAudioEnd=0;
@@ -176,13 +186,29 @@ inline auto esp_sleep_get_wakeup_cause(){return mockWake;}
 inline auto esp_reset_reason(){return mockReset;}
 using gpio_num_t=int;
 #define RTC_GPIO_MODE_INPUT_ONLY 0
-inline void rtc_gpio_init(gpio_num_t){}
+using esp_err_t=int;
+constexpr int ESP_OK=0,ESP_ERR_INVALID_STATE=0x103;
+inline int mockWakeError=ESP_OK;
+inline esp_err_t rtc_gpio_init(gpio_num_t){return ESP_OK;}
 inline void rtc_gpio_deinit(gpio_num_t){}
-inline void rtc_gpio_set_direction(gpio_num_t,int){}
-inline void rtc_gpio_pullup_en(gpio_num_t){}
-inline void rtc_gpio_pulldown_dis(gpio_num_t){}
+inline esp_err_t rtc_gpio_set_direction(gpio_num_t,int){return ESP_OK;}
+inline esp_err_t rtc_gpio_pullup_en(gpio_num_t){return ESP_OK;}
+inline esp_err_t rtc_gpio_pulldown_dis(gpio_num_t){return ESP_OK;}
+inline int rtc_gpio_get_level(gpio_num_t pin){return pins[pin];}
 inline uint64_t mockWakeMicros=0;
-inline void esp_sleep_enable_ext0_wakeup(gpio_num_t,int){}
-inline void esp_sleep_enable_timer_wakeup(uint64_t t){mockWakeMicros=t;}
+inline esp_err_t esp_sleep_enable_ext0_wakeup(gpio_num_t,int){return mockWakeError;}
+inline esp_err_t esp_sleep_enable_timer_wakeup(uint64_t t){mockWakeMicros=t;return mockWakeError;}
 struct Slept{};
 inline void esp_deep_sleep_start(){throw Slept{};}
+
+struct esp_task_wdt_config_t {uint32_t timeout_ms,idle_core_mask;bool trigger_panic;};
+inline esp_task_wdt_config_t mockWdtConfig{};
+inline bool mockWdtSubscribed=false;
+inline int mockWdtFeeds=0;
+inline esp_err_t esp_task_wdt_init(const esp_task_wdt_config_t* c){mockWdtConfig=*c;return ESP_OK;}
+inline esp_err_t esp_task_wdt_reconfigure(const esp_task_wdt_config_t* c){mockWdtConfig=*c;return ESP_OK;}
+inline esp_err_t esp_task_wdt_status(void*){return mockWdtSubscribed?ESP_OK:1;}
+inline esp_err_t esp_task_wdt_add(void*){mockWdtSubscribed=true;return ESP_OK;}
+inline esp_err_t esp_task_wdt_reset(){mockWdtFeeds++;return ESP_OK;}
+struct EspClass {uint32_t getFreeHeap(){return 100000;}};
+inline EspClass ESP;

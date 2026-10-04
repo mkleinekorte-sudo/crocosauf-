@@ -33,7 +33,7 @@ public class MainActivity extends Activity implements BleClient.Listener {
     private SharedPreferences preferences;
     private boolean approved=false,configured=false,visible=false,volumeDragging=false;
     private String tab="Musik",musicGroup="g",effectGroup="ge",chosenAddress="",chosenName="Crocosauf Deluxe";
-    private TextView connectionLabel,statusLabel,messageLabel;
+    private TextView connectionLabel,statusLabel,messageLabel,deviceSummary;
     private LinearLayout page,root;
     private Button connectButton,volumeMute;
     private SeekBar volumeBar;
@@ -116,7 +116,7 @@ public class MainActivity extends Activity implements BleClient.Listener {
     private void guarded(View view){commandViews.add(view);view.setEnabled(approved&&configured);view.setAlpha(approved&&configured?1:.45f);}
     private void updateControls(){for(View v:commandViews){v.setEnabled(approved&&configured);v.setAlpha(approved&&configured?1:.45f);}}
     private void renderPage(){
-        page.removeAllViews();commandViews.clear();volumeBar=null;volumeMute=null;volumeText=null;
+        page.removeAllViews();commandViews.clear();volumeBar=null;volumeMute=null;volumeText=null;deviceSummary=null;
         if(!configured){LinearLayout intro=card();heading(intro,"Verbinden. Auswählen. Spielen.");hint(intro,"Musik, Licht und Display - alle Einstellungen bleiben auf deinem Crocosauf gespeichert. Verbinde dich, um seine aktuellen Einstellungen zu laden.");page.addView(intro);}
         if(tab.equals("Musik"))renderSelection(false);
         else if(tab.equals("Effekte"))renderSelection(true);
@@ -163,7 +163,104 @@ public class MainActivity extends Activity implements BleClient.Listener {
     private EditText input(String value,int type){
         EditText e=new EditText(this);e.setText(value);e.setTextColor(INK);e.setTextSize(16);e.setSingleLine(true);e.setInputType(type);e.setMinHeight(dp(50));return e;
     }
+    private boolean feature(String name){
+        JSONObject f=config.optJSONObject("features");
+        if(f!=null&&f.optBoolean(name))return true;
+        // The user's earlier 40-LED app-only sketch advertises fields, not a features object.
+        if(name.equals("visualSettings"))return config.has("rotation")&&config.has("ledBrightness");
+        if(name.equals("audioSettings"))return config.has("audioEnabled")&&config.has("welcomeVolume");
+        return false;
+    }
+    private SeekBar settingSlider(LinearLayout box,String title,int value,int maximum,boolean percent){
+        TextView label=text("",15,INK,false);box.addView(label);
+        SeekBar slider=new SeekBar(this);slider.setMax(maximum);slider.setProgress(Math.max(0,Math.min(value,maximum)));
+        slider.setContentDescription(title);slider.setMinimumHeight(dp(48));box.addView(slider);guarded(slider);
+        SeekBar.OnSeekBarChangeListener listener=new SeekBar.OnSeekBarChangeListener(){
+            public void onProgressChanged(SeekBar bar,int progress,boolean fromUser){label.setText(title+": "+(percent?Math.round(progress*100f/maximum)+" %":progress+" / "+maximum));}
+            public void onStartTrackingTouch(SeekBar bar){}
+            public void onStopTrackingTouch(SeekBar bar){}
+        };
+        slider.setOnSeekBarChangeListener(listener);listener.onProgressChanged(slider,slider.getProgress(),false);return slider;
+    }
+    private Spinner settingChoices(LinearLayout box,String title,String[] labels,int selected){
+        hint(box,title);Spinner choice=new Spinner(this);choice.setContentDescription(title);
+        ArrayAdapter<String> values=new ArrayAdapter<>(this,android.R.layout.simple_spinner_item,labels);
+        values.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);choice.setAdapter(values);choice.setSelection(selected);
+        box.addView(choice,new LinearLayout.LayoutParams(-1,dp(52)));guarded(choice);return choice;
+    }
+    private void renderVisualSettings(){
+        LinearLayout light=card();heading(light,"Licht & Display");
+        if(!feature("visualSettings")){
+            hint(light,configured?"Für Helligkeit und Displaydrehung bitte den 40-LED-Sketch v6.6 aufspielen.":"Nach dem Verbinden siehst du hier Helligkeit und Displaydrehung.");page.addView(light);return;
+        }
+        SeekBar leds=settingSlider(light,"LED-Helligkeit",config.optInt("ledBrightness",100),100,true);
+        SeekBar display=settingSlider(light,"Displayhelligkeit",config.optInt("displayBrightness",100),100,true);
+        hint(light,"LEDs: 0 % = aus. Display: 0 % ist die dunkelste, 100 % die hellste Stufe.");
+        Spinner rotation=settingChoices(light,"Display drehen",new String[]{"0° · normal","90°","180° · auf dem Kopf","270°"},Math.max(0,Math.min(3,config.optInt("rotation",0))));
+        Button save=button("Licht & Display speichern",true,()->{
+            final int l=leds.getProgress(),d=display.getProgress(),r=rotation.getSelectedItemPosition();
+            command("/saveDisplayCfg?lbr="+l+"&dbr="+d+"&rot="+r,()->{
+                try{config.put("ledBrightness",l);config.put("displayBrightness",d);config.put("rotation",r);}catch(JSONException ignored){}
+            });
+        });light.addView(save);guarded(save);
+        hint(light,"Speichern übernimmt die Werte sofort für alle Modi und behält sie nach dem Ausschalten."+(feature("diagnostics")?" Zum Prüfen der Drehung erst speichern, dann das F anzeigen.":""));
+        if(feature("diagnostics")){
+            Button test=button("F zur Ausrichtung anzeigen / stoppen",false,()->command("/testOrientation",null));light.addView(test);guarded(test);
+        }
+        page.addView(light);
+    }
+    private void renderAudioSettings(){
+        if(!feature("audioSettings"))return;
+        LinearLayout audio=card();heading(audio,"Audio beim Einschalten");
+        Switch enabled=new Switch(this);enabled.setText("Audio aktiv");enabled.setTextColor(INK);enabled.setMinHeight(dp(48));enabled.setChecked(config.optBoolean("audioEnabled",true));audio.addView(enabled);guarded(enabled);
+        Switch mutedStart=new Switch(this);mutedStart.setText("Spiel startet stumm");mutedStart.setTextColor(INK);mutedStart.setMinHeight(dp(48));mutedStart.setChecked(config.optInt("startVolume",20)==0);audio.addView(mutedStart);guarded(mutedStart);
+        SeekBar start=settingSlider(audio,"Startlautstärke",Math.max(5,config.optInt("startVolume",20)),30,false);start.setMin(5);
+        SeekBar welcome=settingSlider(audio,"Welcome-Lautstärke",config.optInt("welcomeVolume",20),30,false);
+        hint(audio,"Welcome hat einen eigenen Pegel. Er darf beim Einschalten auch bei stummem Spiel ertönen. Welcome auf 0 oder „Audio aktiv“ aus schaltet ihn ab. Speichern übernimmt den Startpegel auch sofort.");
+        Button save=button("Audioeinstellungen speichern",true,()->{
+            final boolean on=enabled.isChecked();final int v=mutedStart.isChecked()?0:start.getProgress(),w=welcome.getProgress();
+            command("/saveAudioCfg?aen="+(on?1:0)+"&vstart="+v+"&vwelcome="+w,()->{
+                try{config.put("audioEnabled",on);config.put("startVolume",v);config.put("welcomeVolume",w);}catch(JSONException ignored){}
+            });
+        });audio.addView(save);guarded(save);page.addView(audio);
+    }
+    private void renderPowerSettings(){
+        if(!feature("sleepSettings"))return;
+        LinearLayout power=card();heading(power,"Automatischer Schlaf");
+        int[] minutes={0,15,30,60};int selected=0;
+        for(int i=0;i<minutes.length;i++)if(minutes[i]==config.optInt("sleepMinutes",0))selected=i;
+        Spinner timeout=settingChoices(power,"Bei geschlossenem Maul ohne Bedienung",new String[]{"Aus · dauerhaft bereit","Nach 15 Minuten","Nach 30 Minuten","Nach 60 Minuten"},selected);
+        hint(power,"Für den ersten Dauertest bitte „Aus“ lassen. Dann bleiben Maulsensor, Display, Reminder und Bluetooth aktiv. Schlaf spart Strom; zum Verbinden das Maul öffnen und danach wieder schließen.");
+        Button save=button("Schlafeinstellung speichern",true,()->{
+            final int value=minutes[timeout.getSelectedItemPosition()];
+            command("/savePower?sleep="+value,()->{try{config.put("sleepMinutes",value);}catch(JSONException ignored){}});
+        });power.addView(save);guarded(save);page.addView(power);
+    }
+    private String diagnosticText(){
+        if(!configured)return "Geräteinformationen erscheinen nach dem Verbinden.";
+        StringBuilder value=new StringBuilder("Firmware ").append(status.optString("version","wird geladen …"));
+        if(config.has("numLeds"))value.append(" · ").append(config.optInt("numLeds")).append(" LEDs");
+        if(status.has("uptimeSec")){
+            long seconds=status.optLong("uptimeSec");value.append("\nSeit Start: ").append(seconds/3600).append(" h ").append((seconds/60)%60).append(" min");
+        }
+        if(status.has("matrixOk"))value.append("\nDisplay: ").append(status.optBoolean("matrixOk")?"erreichbar":"nicht erreichbar · Verkabelung prüfen");
+        if(status.has("watchdogOk"))value.append("\nNeustartkontrolle: ").append(status.optBoolean("watchdogOk")?"aktiv":"nicht aktiv");
+        if(status.has("resetReason")){
+            int reason=status.optInt("resetReason");String label;
+            switch(reason){case 1:label="Einschalten";break;case 3:label="Software-Neustart";break;case 5:case 6:case 7:label="Watchdog";break;case 8:label="Aufwachen";break;case 9:label="Spannungseinbruch";break;default:label="Code "+reason;}
+            value.append("\nLetzter Start: ").append(label);
+        }
+        if(status.optInt("audioTrack",0)>0){
+            int folder=status.optInt("audioFolder");value.append("\nLetzter Soundauftrag: ").append(folder==0?"Root-Index ":String.format(Locale.GERMANY,"/%02d/",folder));
+            value.append(String.format(Locale.GERMANY,"%03d",status.optInt("audioTrack")));
+        }
+        value.append("\nDFPlayer BUSY: ").append(status.optBoolean("busy")?"spielt":"inaktiv");
+        if(!status.optString("error").isEmpty())value.append("\n").append(status.optString("error"));
+        if(!status.optString("systemError").isEmpty())value.append("\n").append(status.optString("systemError"));
+        return value.toString();
+    }
     private void renderSystem(){
+        renderVisualSettings();
         LinearLayout volume=card();heading(volume,"Lautstärke");
         volumeText=text("Pegel "+status.optInt("vol",20)+" / 30",15,INK,false);volume.addView(volumeText);
         volumeBar=new SeekBar(this);volumeBar.setMax(25);volumeBar.setProgress(status.optInt("vol",20)-5);volumeBar.setContentDescription("Lautstärke 5 bis 30");volume.addView(volumeBar);guarded(volumeBar);
@@ -173,16 +270,17 @@ public class MainActivity extends Activity implements BleClient.Listener {
             public void onStopTrackingTouch(SeekBar bar){volumeDragging=false;command("/volume?v="+(bar.getProgress()+5),null);}
         });
         volumeMute=button(status.optBoolean("muted")?"Ton einschalten":"Stummschalten",true,()->command("/muteToggle",null));volume.addView(volumeMute);guarded(volumeMute);page.addView(volume);
+        renderAudioSettings();
         LinearLayout reminder=card();heading(reminder,"Reminder");
         Switch enabled=new Switch(this);enabled.setText("Erinnerung aktiv");enabled.setTextColor(INK);enabled.setMinHeight(dp(48));enabled.setChecked(config.optBoolean("remEn",true));reminder.addView(enabled);guarded(enabled);
         Switch sound=new Switch(this);sound.setText("Mit Sound");sound.setTextColor(INK);sound.setMinHeight(dp(48));sound.setChecked(config.optBoolean("remSnd",true));reminder.addView(sound);guarded(sound);
         hint(reminder,"Intervall in Minuten (1–60)");EditText minutes=input(""+config.optInt("remMin",8),InputType.TYPE_CLASS_NUMBER);minutes.setContentDescription("Reminder-Intervall in Minuten");reminder.addView(minutes);guarded(minutes);
-        hint(reminder,"Dauer in Millisekunden (1500–9000)");EditText duration=input(""+config.optInt("remDur",3500),InputType.TYPE_CLASS_NUMBER);duration.setContentDescription("Reminder-Dauer in Millisekunden");reminder.addView(duration);guarded(duration);
+        hint(reminder,"Dauer für LEDs und Display (1500–30000 ms)");EditText duration=input(""+config.optInt("remLed",config.optInt("remDur",3500)),InputType.TYPE_CLASS_NUMBER);duration.setContentDescription("Reminder-Dauer in Millisekunden");reminder.addView(duration);guarded(duration);
         Button save=button("Reminder speichern",true,()->{
             int min=parseNumber(minutes),dur=parseNumber(duration);
-            if(min<1||min>60||dur<1500||dur>9000){onMessage("Bitte 1–60 Minuten und 1500–9000 ms eintragen.");return;}
-            String route="/saveReminderCfg?rmin="+min+"&rdur="+dur+(enabled.isChecked()?"&ren=1":"")+(sound.isChecked()?"&rsnd=1":"");
-            command(route,()->{try{config.put("remEn",enabled.isChecked());config.put("remSnd",sound.isChecked());config.put("remMin",min);config.put("remDur",dur);}catch(JSONException ignored){}});
+            if(min<1||min>60||dur<1500||dur>(config.has("remLed")?30000:9000)){onMessage("Bitte 1–60 Minuten und eine gültige Dauer eintragen (bei alter Firmware höchstens 9000 ms).");return;}
+            String route="/saveReminderCfg?rmin="+min+"&rdur="+Math.min(dur,9000)+"&rled="+dur+(enabled.isChecked()?"&ren=1":"")+(sound.isChecked()?"&rsnd=1":"");
+            command(route,()->{try{config.put("remEn",enabled.isChecked());config.put("remSnd",sound.isChecked());config.put("remMin",min);config.put("remDur",Math.min(dur,9000));config.put("remLed",dur);}catch(JSONException ignored){}});
         });reminder.addView(save);guarded(save);
         Button test=button("Reminder testen",false,()->command("/testReminder",null));reminder.addView(test);guarded(test);page.addView(reminder);
         LinearLayout scroll=card();heading(scroll,"Laufschrift");hint(scroll,"Bis zu 40 darstellbare Zeichen. Umlaute werden ausgeschrieben.");
@@ -190,10 +288,12 @@ public class MainActivity extends Activity implements BleClient.Listener {
         Button saveText=button("Text speichern",true,()->command("/saveText?txt="+WireProtocol.encode(scrollText.getText().toString()),()->{
             ble.send("/config",reply->{if(reply.ok())try{JSONObject latest=new JSONObject(reply.body);config.put("standby",latest.getString("standby"));scrollText.setText(config.optString("standby"));}catch(JSONException ex){onMessage("Gespeicherten Text bitte erneut laden.");}});
         }));scroll.addView(saveText);guarded(saveText);page.addView(scroll);
-        LinearLayout reset=card();heading(reset,"Gerät");hint(reset,"Normal / Pinchen wählst du weiterhin am Schalter. Werkseinstellungen setzen Auswahl, Lautstärke, Text, Reminder und Rundenzähler zurück.");
+        renderPowerSettings();
+        LinearLayout diagnostics=card();heading(diagnostics,"Gerätestatus");deviceSummary=text(diagnosticText(),14,MUTED,false);deviceSummary.setTextIsSelectable(true);diagnostics.addView(deviceSummary);page.addView(diagnostics);
+        LinearLayout reset=card();heading(reset,"Gerät");hint(reset,"Normal / Pinchen wählst du weiterhin am Schalter. Werkseinstellungen setzen Auswahl, Lautstärke, Text, Licht, Display, Schlafzeit, Reminder und Rundenzähler zurück.");
         Button factory=button("Werkseinstellungen …",false,()->new AlertDialog.Builder(this).setTitle("Alles zurücksetzen?").setMessage("Die Einstellungen und der Rundenzähler werden zurückgesetzt. Deine SD-Dateien bleiben erhalten.").setNegativeButton("Abbrechen",null).setPositiveButton("Zurücksetzen",(d,w)->command("/factoryReset?confirm=yes",()->{configured=false;loadConfig();})).show());reset.addView(factory);guarded(factory);
         Button refresh=button("Einstellungen neu laden",false,()->new AlertDialog.Builder(this).setTitle("Neu laden?").setMessage("Ungespeicherte Änderungen in der App werden verworfen.").setNegativeButton("Abbrechen",null).setPositiveButton("Neu laden",(d,w)->{configured=false;loadConfig();}).show());reset.addView(refresh);guarded(refresh);
-        hint(reset,"App 1.0-beta · Firmware v6.4-BLE\nVerbindung nur zur Steuerung. Keine Cloud, kein Konto, kein Musikstreaming.");page.addView(reset);
+        hint(reset,"App 1.1 · Crocosauf Bluetooth\nVerbindung nur zur Steuerung. Keine Cloud, kein Konto, kein Musikstreaming.");page.addView(reset);
     }
     private int parseNumber(EditText view){try{return Integer.parseInt(view.getText().toString().trim());}catch(NumberFormatException e){return -1;}}
     private void command(String route,Runnable after){
@@ -238,6 +338,8 @@ public class MainActivity extends Activity implements BleClient.Listener {
                 status=new JSONObject(reply.body);
                 statusLabel.setText((status.optBoolean("pinchen")?"Pinchen · Runde "+status.optInt("round"):"Normalmodus")+"  |  "+status.optString("state")+"\nMaul "+(status.optBoolean("open")?"offen":"geschlossen")+" · Pegel "+status.optInt("vol")+(status.optBoolean("muted")?" · stumm":""));
                 if(status.optString("error").length()>0)onMessage(status.optString("error"));
+                if(status.optString("systemError").length()>0)onMessage(status.optString("systemError"));
+                if(deviceSummary!=null)deviceSummary.setText(diagnosticText());
                 if(volumeBar!=null&&!volumeDragging)volumeBar.setProgress(Math.max(0,status.optInt("vol",20)-5));
                 if(volumeMute!=null)volumeMute.setText(status.optBoolean("muted")?"Ton einschalten":"Stummschalten");
             }catch(JSONException ex){onMessage("Status konnte nicht gelesen werden.");}

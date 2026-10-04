@@ -1,4 +1,4 @@
-#include "../firmware/Crocosauf_Deluxe_v6_5_BLE/Crocosauf_Deluxe_v6_5_BLE.ino"
+#include "../firmware/Crocosauf_Deluxe_v6_6_BLE_40LED_APPONLY/Crocosauf_Deluxe_v6_6_BLE_40LED_APPONLY.ino"
 #define CHECK(x) do{if(!(x)){std::cerr<<"FAIL "<<__LINE__<<": "<<#x<<"\n";return 2;}}while(0)
 static void tick(uint32_t duration) {
   uint32_t start=millis();
@@ -104,13 +104,13 @@ int main(int argc,char**argv) {
     auto before=order();pinchenOrderValid=false;loadPinchenOrder();CHECK(order()==before);
     resetRounds();for(int i=0;i<10;i++) CHECK(pinchenOrder[i]!=before[i]);
   } else if(name=="pinchen_resume") {
-    boot(true);auto original=order();
+    boot(true);sleepMinutes=30;prefs.putUShort("sleepMin",30);auto original=order();
     for(int i=0;i<4;i++){startRound();tick(8100);}
     uint16_t used=usedPinchenMask;CHECK(rundeAktuell==5);
     bool slept=false;try{enterDeepSleepNow();}catch(Slept&){slept=true;}
     CHECK(slept);CHECK(player.commands.back().name=="stop");
     mockWake=ESP_SLEEP_WAKEUP_TIMER;mockReset=ESP_RST_DEEPSLEEP;
-    pinchenOrderValid=false;for(auto &p:pinchenOrder)p=0;
+    pinchenOrderValid=false;for(auto &p:pinchenOrder)p=0;rtcReminderRemainingMs=0;mockMillis=0;
     setup();CHECK(order()==original);CHECK(rundeAktuell==5);CHECK(usedPinchenMask==used);
     CHECK(reminderRunning);startRound();CHECK(pinnchenIndex==original[4]);
   } else if(name=="audio_spacing") {
@@ -127,5 +127,5 @@ int main(int argc,char**argv) {
     }
     CHECK(!mockPlaying);CHECK(legacyModesAbsent());
   } else return 3;
-  std::cout<<"PASS v6.5 "<<name<<"\n";
+  std::cout<<"PASS v6.6 "<<name<<"\n";
 }
