@@ -25,7 +25,8 @@ public final class SettingsInstrumentation extends Instrumentation {
     private <T> List<T> views(View root,Class<T> type){List<T> result=new ArrayList<>();if(type.isInstance(root))result.add(type.cast(root));if(root instanceof ViewGroup){ViewGroup group=(ViewGroup)root;for(int i=0;i<group.getChildCount();i++)result.addAll(views(group.getChildAt(i),type));}return result;}
     private boolean text(View root,String value){for(TextView v:views(root,TextView.class))if(v.getText().toString().contains(value))return true;return false;}
     private void screenshot(String name)throws Exception{
-        waitForIdleSync();Bitmap bitmap=getUiAutomation().takeScreenshot();require(bitmap!=null,"Screenshot fehlt");
+        waitForIdleSync();android.os.SystemClock.sleep(400);waitForIdleSync();
+        Bitmap bitmap=getUiAutomation().takeScreenshot();require(bitmap!=null,"Screenshot fehlt");
         File dir=new File(getTargetContext().getExternalFilesDir(null),"screenshots");require(dir.exists()||dir.mkdirs(),"Screenshot-Ordner fehlt");
         try(FileOutputStream out=new FileOutputStream(new File(dir,name+".png"))){require(bitmap.compress(Bitmap.CompressFormat.PNG,100,out),"Screenshot fehlgeschlagen");}bitmap.recycle();
     }
