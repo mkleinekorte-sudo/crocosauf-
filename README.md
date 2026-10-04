@@ -30,3 +30,9 @@ ESP32 Dev Module / klassischer WROOM mit 4 MB Flash, Espressif-Core 3.3.7, Parti
 Android: JDK 17, Gradle 8.11.1, SDK 35. Im Ordner `android`: `gradle :app:assembleDebug :app:lintDebug`. Vorhandene `build-app.sh` / `build-app.ps1` helfen beim lokalen Build. Debug-APKs aus unterschiedlichen Builds können andere Signaturen haben; dann vor Installation die alte App deinstallieren. Die Geräteeinstellungen liegen auf dem ESP32.
 
 `bash tests/run-tests.sh` führt C++-Ablauftests und Java-Protokolltests aus. GitHub Actions baut zusätzlich den tatsächlichen ESP32-Sketch, die APK und den Android-Oberflächentest. Simulation, Emulator und Kompilierung ersetzen keinen Dauertest an Marcels Hardware.
+
+## Geprüfter Stand vom 04.10.2026
+
+[Build 15](https://github.com/mkleinekorte-sudo/crocosauf-/actions/runs/37221458573): ESP32-Build, Android-Build/Lint/Signatur und Android-35-Oberflächentest erfolgreich. 35 C++-Szenarien und 267 Java-Protokollprüfungen bestanden. [Prüfbericht mit SHA256](tests/build-report-v6.6.md).
+
+Die ausführliche Anleitung lässt sich mit `python3 tools/render-guide.py` als PDF erzeugen (ReportLab und DejaVu-Schriften). Das Gesamtpaket im Chat enthält die fertige PDF.
