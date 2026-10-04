@@ -55,6 +55,7 @@ struct Stream{};
 struct HardwareSerial:Stream{
  HardwareSerial(int=0){}
  void begin(int,int=0,int=0,int=0){}
+ void flush(){}
  void println(const String& s){(void)s;}
 };
 inline HardwareSerial Serial;
@@ -159,6 +160,8 @@ struct DFPlayerMini_Fast{
  void stop(){add("stop");mockPlaying=false;pins[33]=HIGH;}
  void stopRepeat(){add("stopRepeat");mockLoop=false;}
  void stopRepeatPlay(){add("stopRepeatPlay");}
+ void reset(){add("reset");mockPlaying=false;mockLoop=false;pins[33]=HIGH;}
+ void playbackSource(uint8_t source){add("source",source);mockPlaying=false;pins[33]=HIGH;}
  void volume(uint8_t v){add("volume",v);}
  void start(bool loop){mockLoop=loop;mockPlaying=mockAudioEnabled;pins[33]=mockAudioEnabled?LOW:HIGH;mockAudioEnd=millis()+mockTrackDuration;}
  void play(uint16_t n){add("play",n);start(false);}

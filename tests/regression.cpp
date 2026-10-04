@@ -1,4 +1,4 @@
-#include "../firmware/Crocosauf_Deluxe_v6_4_BLE/Crocosauf_Deluxe_v6_4_BLE.ino"
+#include "../firmware/Crocosauf_Deluxe_v6_5_BLE/Crocosauf_Deluxe_v6_5_BLE.ino"
 #define CHECK(x) do{if(!(x)){std::cerr<<"FAIL "<<__LINE__<<": "<<#x<<"\n";return 2;}}while(0)
 static void tick(uint32_t duration) {
   uint32_t start=millis();
@@ -9,7 +9,7 @@ static void tick(uint32_t duration) {
 }
 static void openMouth(){pins[27]=HIGH;tick(1000);}
 static void closeMouth(){pins[27]=LOW;tick(70);}
-static size_t loops(){size_t n=0;for(auto c:player.commands)if(c.name=="loop")n++;return n;}
+static size_t loops(){size_t n=0;for(auto c:player.commands)if(c.name=="play")n++;return n;}
 static void noWelcomeBoot(bool pin=false) {
   mockReset=ESP_RST_SW;pins.fill(HIGH);pins[27]=LOW;pins[25]=pin?LOW:HIGH;
   setup();
@@ -28,7 +28,7 @@ int main(int argc,char**argv) {
   CHECK(loops()==1);
  } else if(name=="welcome_missing") {
   pins.fill(HIGH);pins[27]=HIGH;mockAudioEnabled=false;
-  setup();tick(5600);CHECK(!welcomeActive);CHECK(stage==PLAYING);
+  setup();tick(6200);CHECK(!welcomeActive);CHECK(stage==PLAYING);
   CHECK(audioError.length()>0);tick(5500);CHECK(gameAudioFailed);
   size_t count=loops();tick(10000);CHECK(loops()==count);
  } else if(name=="welcome_stuck") {
@@ -106,6 +106,7 @@ int main(int argc,char**argv) {
   pins.fill(HIGH);pins[27]=LOW;pins[25]=LOW;
   mockWake=ESP_SLEEP_WAKEUP_TIMER;mockReset=ESP_RST_DEEPSLEEP;
   rtcMagic=0xC60C6301;rtcRound=4;rtcUsed=7;rtcPinchenMode=1;
+  prefs.putString("pOrder","0123456789");
   setup();CHECK(rundeAktuell==4);CHECK(usedPinchenMask==7);CHECK(!wifiEnabled);
   CHECK(reminderRunning);CHECK(sleepAfterReminder);
   bool slept=false;try{tick(4000);}catch(Slept&){slept=true;}CHECK(slept);

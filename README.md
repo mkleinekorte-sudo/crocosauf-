@@ -1,11 +1,15 @@
 # Crocosauf Bluetooth - Android-App 1.0-beta
 
 Für Marcels Crocosauf Deluxe mit ESP32 DevKit V1 / WROOM, DFPlayer, 20 LEDs und HT16K33-Display.
-Stand: 26.09.2026. Firmware: **v6.4-BLE**, auf Basis der Reparaturfassung v6.3.
+Stand: 04.10.2026. Aktuelle Firmware: **v6.5-BLE**; die vorhandene App **1.0-beta** bleibt kompatibel.
+
+**Aktueller vollständiger Arduino-Sketch:** [Crocosauf_Deluxe_v6_5_BLE.ino](firmware/Crocosauf_Deluxe_v6_5_BLE/Crocosauf_Deluxe_v6_5_BLE.ino). Es ist eine Einzeldatei mit enthaltener Bluetooth-Steuerung.
+
+Änderungen und gezielter Gerätetest: [Firmware v6.5](firmware/UPDATE_v6_5.md). Die frühere v6.4 bleibt als Sicherung im Repository.
 
 **Die installierbare Android-Testversion ist fertig gebaut.** Android-Build, Android Lint, APK-Signaturprüfung und der echte ESP32-Build waren erfolgreich. Die APK wurde im Chat als `Crocosauf_1.0-beta.apk` bereitgestellt. Zusätzlich liegt sie als ZIP-Artefakt im [erfolgreichen GitHub-Build](https://github.com/mkleinekorte-sudo/crocosauf-/actions/runs/36250755658). Ein Versuch auf dem Handy und am echten Crocosauf steht noch aus.
 
-**Voraussetzung für Bluetooth:** Den neuen Sketch `firmware/Crocosauf_Deluxe_v6_4_BLE` einmal per USB auf den ESP32 laden. Mit dem alten v6.2-Sketch kann sich die App nicht verbinden.
+**Voraussetzung für Bluetooth:** Den neuen Sketch `firmware/Crocosauf_Deluxe_v6_5_BLE` einmal per USB auf den ESP32 laden. Mit dem alten v6.2-Sketch kann sich die App nicht verbinden.
 
 ## Was du damit bedienen kannst
 
@@ -26,9 +30,9 @@ Die Spielmechanik, Maulerkennung und zehn Pinchenrunden arbeiten eigenständig w
 ## 1. ESP32 vorbereiten
 
 1. Deine bisherige funktionierende Firmware und die SD-Karte sichern.
-2. Den gesamten Ordner `firmware/Crocosauf_Deluxe_v6_4_BLE` an einen geeigneten Platz kopieren.
-3. Darin `Crocosauf_Deluxe_v6_4_BLE.ino` mit Arduino IDE öffnen. **Die beiden .h-Dateien müssen im selben Ordner bleiben.**
-4. ESP32-Boardpaket von Espressif installieren. Das vorbereitete Buildziel verwendet **3.3.0**.
+2. Den gesamten Ordner `firmware/Crocosauf_Deluxe_v6_5_BLE` an einen geeigneten Platz kopieren.
+3. Darin `Crocosauf_Deluxe_v6_5_BLE.ino` mit Arduino IDE öffnen. **v6.5 enthält alles in dieser einen Datei; keine zusätzlichen .h-Dateien nötig.**
+4. ESP32-Boardpaket von Espressif installieren. Das aktuelle Buildziel verwendet **3.3.7**, wie Marcels Arduino-Installation.
 5. Board **ESP32 Dev Module**, klassischer WROOM. Bei einem 4-MB-Modul unter Partition Scheme **Huge APP (3MB No OTA/1MB SPIFFS)** auswählen. Diese Version nutzt kein OTA.
 6. Bibliotheken installieren: FastLED, DFPlayerMini_Fast, FireTimer, Adafruit GFX Library, Adafruit LED Backpack Library, Adafruit BusIO. BLE ist Bestandteil des ESP32-Boardpakets; keine alte zusätzliche ESP32-BLE-Bibliothek installieren.
 7. Überprüfen/kompilieren, anschließend per USB hochladen und neu einschalten.
@@ -130,7 +134,7 @@ Die öffentliche Firmware enthält kein festes WLAN-Passwort. Beim ersten WLAN-S
 
 ## 7. Prüfung vor dem ersten Spielabend
 
-- Passende Firmware v6.4-BLE über USB auf den ESP32 laden; beim Selbstbau die unten geprüften Bibliotheksversionen verwenden.
+- Passende Firmware v6.5-BLE über USB auf den ESP32 laden; beim Selbstbau die unten geprüften Bibliotheksversionen verwenden.
 - Gerät in der App finden, Freigabe ausführen, alle Einstellungen korrekt laden.
 - Vor der Freigabe müssen Steuerbefehle gesperrt sein.
 - Track testen; Maul öffnen: Test endet, Spiel startet.
@@ -140,7 +144,9 @@ Die öffentliche Firmware enthält kein festes WLAN-Passwort. Beim ersten WLAN-S
 - Während Bluetooth verbunden bleibt, WLAN nach fünf Minuten ohne WLAN-Client ausschalten lassen.
 - Danach geschlossen und ohne App/WLAN-Client schlafen lassen und durch Öffnen wieder wecken.
 
-## 8. Was bereits geprüft wurde
+## 8. Prüfung der früheren v6.4 und der App
+
+Die folgenden Buildwerte gehören zu v6.4 bzw. der unveränderten App. Die v6.5-Prüfung ist in `firmware/UPDATE_v6_5.md` dokumentiert.
 
 - Echter Android-Build mit SDK 35, Build-Tools 35.0.0, Gradle 8.11.1, AGP 8.9.2 und JDK 17: erfolgreich.
 - Android Lint: keine Fehler; drei Hinweise zu Ziel-API, älteren Android-Versionen und Backup-Konfiguration. Kein Laufzeittest auf einem Handy oder Emulator.

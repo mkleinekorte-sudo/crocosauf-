@@ -1,0 +1,30 @@
+PASS welcome
+PASS welcome_missing
+PASS welcome_stuck
+PASS normal
+PASS ten_rounds
+PASS switch_phases
+PASS tests_interrupt
+PASS wifi_idle
+PASS reminder_sleep
+PASS timer_wake
+PASS wake_interrupted
+PASS mute_volume
+PASS audio_keepalive
+PASS pickers
+PASS web_export
+PASS animations
+PASS wrap
+PASS BLE approval
+PASS BLE settings
+PASS BLE framing
+PASS BLE lifecycle
+PASS v6.5 welcome_selection
+PASS v6.5 welcome_reboot_sequence
+PASS v6.5 gameover_sequence
+PASS v6.5 gameover_random
+PASS v6.5 pinchen_pairs_shuffle
+PASS v6.5 pinchen_resume
+PASS v6.5 audio_spacing
+PASS Java transport: 267 checks (including 64 fragment sizes)
+PASS Java syntax: 3 source files; not an Android build

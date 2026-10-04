@@ -44,14 +44,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Spiel-, Sound- und Bluetooth-Ablauftests
+        run: bash tests/run-tests.sh
       - uses: arduino/setup-arduino-cli@v2
       - run: |
           arduino-cli config init
           arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
           arduino-cli core update-index
-          arduino-cli core install esp32:esp32@3.3.0
-          arduino-cli lib install 'FastLED' 'DFPlayerMini_Fast' 'FireTimer' 'Adafruit GFX Library' 'Adafruit LED Backpack Library' 'Adafruit BusIO'
-          arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=huge_app --warnings all --output-dir build/esp32 firmware/Crocosauf_Deluxe_v6_4_BLE
+          arduino-cli core install esp32:esp32@3.3.7
+          arduino-cli lib install 'FastLED@3.10.5' 'DFPlayerMini_Fast@1.2.4' 'FireTimer@1.0.5' 'Adafruit GFX Library@1.12.6' 'Adafruit LED Backpack Library@1.5.1' 'Adafruit BusIO@1.17.4'
+          arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=huge_app --warnings all --output-dir build/esp32 firmware/Crocosauf_Deluxe_v6_5_BLE
       - uses: actions/upload-artifact@v4
         with:
           name: Crocosauf-ESP32-build
