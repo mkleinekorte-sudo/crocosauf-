@@ -1,12 +1,14 @@
-name: Crocosauf Build
+name: Arbeitsstunden Android APK
 on:
-  workflow_dispatch:
   push:
-    branches: [main, master]
+    branches: [build-arbeitsstunden-android]
+  workflow_dispatch:
+
 permissions:
   contents: read
+
 jobs:
-  android:
+  build-apk:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -15,88 +17,21 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: android-actions/setup-android@v3
-        with:
-          packages: platform-tools
-          log-accepted-android-sdk-licenses: false
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.11.1'
-      - run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
-      - run: gradle --no-daemon :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug
-        working-directory: android
-      - name: APK prüfen
+      - name: Android SDK
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+      - name: APK bauen
+        working-directory: arbeitsstunden-android
+        run: gradle --no-daemon :app:assembleDebug
+      - name: APK prüfen und benennen
         run: |
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose android/app/build/outputs/apk/debug/app-debug.apk
-          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging android/app/build/outputs/apk/debug/app-debug.apk
-          sha256sum android/app/build/outputs/apk/debug/app-debug.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose arbeitsstunden-android/app/build/outputs/apk/debug/app-debug.apk
+          cp arbeitsstunden-android/app/build/outputs/apk/debug/app-debug.apk Arbeitsstunden-Marcel-Christian.apk
+          sha256sum Arbeitsstunden-Marcel-Christian.apk
       - uses: actions/upload-artifact@v4
         with:
-          name: Crocosauf-Android-APK
-          path: android/app/build/outputs/apk/debug/app-debug.apk
-          if-no-files-found: error
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: Crocosauf-Android-Pruefberichte
-          path: android/app/build/reports/
-          if-no-files-found: ignore
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Crocosauf-Android-UI-Test
-          path: android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
-          if-no-files-found: error
-  android-ui:
-    needs: android
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-      - uses: actions/download-artifact@v4
-        with:
-          name: Crocosauf-Android-APK
-          path: apk
-      - uses: actions/download-artifact@v4
-        with:
-          name: Crocosauf-Android-UI-Test
-          path: test-apk
-      - name: KVM erlauben
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-      - uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 35
-          arch: x86_64
-          profile: pixel_7
-          disable-animations: true
-          script: bash tests/android-ui.sh
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: Crocosauf-Android-Screenshots
-          path: ui-results/
-          if-no-files-found: ignore
-  esp32:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Spiel-, Sound- und Bluetooth-Ablauftests
-        run: bash tests/run-tests.sh
-      - uses: arduino/setup-arduino-cli@v2
-      - run: |
-          arduino-cli config init
-          arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
-          arduino-cli core update-index
-          arduino-cli core install esp32:esp32@3.3.7
-          arduino-cli lib install 'FastLED@3.10.5' 'DFPlayerMini_Fast@1.2.4' 'FireTimer@1.0.5' 'Adafruit GFX Library@1.12.6' 'Adafruit LED Backpack Library@1.5.1' 'Adafruit BusIO@1.17.4'
-          arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=huge_app --warnings all --output-dir build/esp32 firmware/Crocosauf_Deluxe_v6_6_BLE_40LED_APPONLY
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Crocosauf-ESP32-build
-          path: build/esp32/
+          name: Arbeitsstunden-Marcel-Christian-APK
+          path: Arbeitsstunden-Marcel-Christian.apk
           if-no-files-found: error
