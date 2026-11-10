@@ -3,10 +3,8 @@ on:
   push:
     branches: [build-arbeitsstunden-android]
   workflow_dispatch:
-
 permissions:
   contents: read
-
 jobs:
   build-apk:
     runs-on: ubuntu-latest
@@ -16,12 +14,13 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@v3
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.11.1'
       - name: Android SDK
-        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platforms;android-35' 'build-tools;35.0.0'
       - name: APK bauen
         working-directory: arbeitsstunden-android
         run: gradle --no-daemon :app:assembleDebug
